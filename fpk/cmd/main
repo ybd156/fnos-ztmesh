@@ -20,6 +20,24 @@ WEB_APP_DIR="${APPDEST}/www"
 WEB_SERVER="${APPDEST}/server/server.js"
 NODE="node"
 
+# --- architecture: pick the correct bundled zerotier-one --------------------
+# The fpk contains the matching binary for the platform declared in the
+# manifest.  We still check uname -m here in case someone manually extracts
+# the package on the wrong architecture.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64)
+    ZT_BIN="${APPDEST}/zt/zerotier-one"  # x86-64 ELF
+    ;;
+  aarch64|arm64)
+    ZT_BIN="${APPDEST}/zt/zerotier-one"  # arm64 ELF (built from zerotier-one_1.16.2_arm64.deb)
+    ;;
+  *)
+    log "ERROR: unsupported architecture '$ARCH'"
+    exit 1
+    ;;
+esac
+
 ZT_PIDFILE="${PKGTMP}/zerotier-one.pid"
 WEB_PIDFILE="${PKGTMP}/web.pid"
 ZT_PORTFILE="${ZT_DIR}/zerotier-one.port"

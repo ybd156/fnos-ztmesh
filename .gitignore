@@ -2,8 +2,10 @@
 /tools/
 /dl/
 /ztmesh.fpk
+/ztmesh-*.fpk
 /_fntmp/
 /_raw/
+/_zt_*.deb
 
 # 测试运行产物
 /test-var/

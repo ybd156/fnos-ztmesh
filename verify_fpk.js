@@ -5,8 +5,12 @@ const zlib = require('zlib');
 const tar = require('child_process');
 const crypto = require('crypto');
 
-const FP = path.join(__dirname, 'ztmesh.fpk');
+const FP = path.join(__dirname, process.argv[2] || 'ztmesh-x86.fpk');
 const raw = zlib.gunzipSync(fs.readFileSync(FP));
+
+// Detect expected platform from filename (e.g. ztmesh-arm.fpk -> arm)
+const PLAT = (FP.match(/ztmesh-(\w+)\.fpk$/) || [])[1] || 'x86';
+const EXPECTED_MACHINE = PLAT === 'arm' ? 183 : 62;   // 183=aarch64, 62=x86-64
 
 function parseTar(buf) {
   const out = [];
@@ -61,7 +65,7 @@ ok(zt && (zt.mode & 0o111) === 0o111, `zt/zerotier-one executable (mode ${zt ? z
 if (zt) {
   const elf = zt.data.slice(0, 4);
   ok(elf[0] === 0x7f && elf[1] === 0x45 && elf[2] === 0x4c && elf[3] === 0x46, 'zt/zerotier-one is an ELF binary');
-  ok(zt.data.readUInt16LE(18) === 62, `zt/zerotier-one is x86-64 (e_machine=${zt.data.readUInt16LE(18)})`);
+  ok(zt.data.readUInt16LE(18) === EXPECTED_MACHINE, `zt/zerotier-one is ${PLAT} (e_machine=${zt.data.readUInt16LE(18)}, expected ${EXPECTED_MACHINE})`);
 }
 const sv = find(inner, 'www/css/style.css');
 const sjs = find(inner, 'server/server.js');
@@ -85,6 +89,8 @@ if (mf) {
   console.log(t.split('\n').map((l) => '  ' + l).join('\n'));
   for (const k of ['appname', 'version', 'platform', 'source', 'desktop_uidir', 'desktop_applaunchname', 'service_port'])
     ok(new RegExp('^' + k + '\\s*=', 'm').test(t), `manifest declares ${k}`);
+  const platMatch = t.match(/^platform\s*=\s*(\S+)/m);
+  ok(platMatch && platMatch[1] === PLAT, `manifest platform matches package (${platMatch && platMatch[1]}, expected ${PLAT})`);
 
   // fnpack records md5(app.tgz) as the package checksum; our mode repair
   // rewrites app.tgz, so the declared digest must be the repaired one.

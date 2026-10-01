@@ -10,14 +10,15 @@ log(){ echo "[${APPNAME}/install_init] $*" >> "$LOG" 2>/dev/null; }
 log "=== install_init start ==="
 
 # --- 1. architecture guard -------------------------------------------------
-# The bundled ZeroTier One daemon is a x86-64 ELF binary.
+# The package ships an x86-64 or arm64 (aarch64) ZeroTier One binary.
+# Allow both; anything else aborts.
 ARCH="$(uname -m)"
 log "uname -m = $ARCH"
 case "$ARCH" in
-  x86_64|amd64) : ;;
+  x86_64|amd64|aarch64|arm64) : ;;
   *)
-    log "ERROR: unsupported architecture '$ARCH' (this package ships x86-64 only)"
-    echo "此安装包仅支持 x86-64 架构，当前设备为 $ARCH。"
+    log "ERROR: unsupported architecture '$ARCH' (this package supports x86-64 or arm64 only)"
+    echo "此安装包仅支持 x86-64 或 arm64 架构，当前设备为 $ARCH。"
     exit 1
     ;;
 esac
