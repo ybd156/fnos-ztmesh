@@ -1,11 +1,4 @@
-# ZeroTier异地组网-虚拟局域网 for fnOS（飞牛）— `.fpk` 安装包
-
-把 ZeroTier One 打包成飞牛 fnOS 第三方应用「**ZeroTier异地组网-虚拟局域网**」（开发者/发布者：移不动156，当前版本见 [CHANGELOG.md](CHANGELOG.md)）：以 root 运行守护进程，并提供中文 Web 管理界面。
-
-**交付物**：`ztmesh.fpk`（4.3 MB，含 x86-64 ZeroTier One 1.16.2 官方二进制）
-
-> 本应用使用独立的应用标识 `ztmesh`、独立端口（Web 13443、ZeroTier 19993）和独立数据目录，可与同类应用共存、互不干扰。
-
+# ZeroTier异地组网-虚拟局域网
 ---
 
 ## 安装
