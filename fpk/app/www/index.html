@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ZeroTier异地组网-虚拟局域网</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" type="image/png" href="images/icon_64.png" />
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="images/icon_256.png" alt="ZeroTier" class="brand-logo" />
+      <div class="brand-text">
+        <h1>ZeroTier</h1>
+        <span class="brand-sub">异地组网控制台</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <button class="nav-item active" data-view="overview">概览</button>
+      <button class="nav-item" data-view="networks">网络</button>
+      <button class="nav-item" data-view="subnet">子网路由</button>
+      <button class="nav-item" data-view="peers">对端设备</button>
+    </nav>
+    <div class="service-state">
+      <div class="ss-row">
+        <span class="dot" id="serviceDot"></span>
+        <span id="serviceLabel">服务检测中…</span>
+      </div>
+      <div class="ss-row" id="serviceControls" style="display:none">
+        <button class="btn btn-sm" id="btnStart">启动服务</button>
+        <button class="btn btn-sm" id="btnStop">停止服务</button>
+      </div>
+    </div>
+    <div class="sidebar-foot">ZeroTier One</div>
+  </aside>
+
+  <main class="main">
+    <!-- OVERVIEW -->
+    <section class="view" id="view-overview">
+      <h2>概览</h2>
+      <div class="card-grid">
+        <div class="card">
+          <div class="card-label">设备地址 (Node ID)</div>
+          <div class="card-value mono" id="ov-address">—</div>
+          <button class="btn btn-sm" id="btnCopyAddress">复制</button>
+        </div>
+        <div class="card">
+          <div class="card-label">连接状态</div>
+          <div class="card-value" id="ov-online">—</div>
+        </div>
+        <div class="card">
+          <div class="card-label">版本</div>
+          <div class="card-value" id="ov-version">—</div>
+        </div>
+        <div class="card">
+          <div class="card-label">已加入网络</div>
+          <div class="card-value" id="ov-nnetworks">—</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <h3>网络状态与流量</h3>
+          <button class="btn btn-sm" id="btnRefreshStats">刷新</button>
+        </div>
+        <div id="netStats" class="stat-list"></div>
+      </div>
+      <div class="card">
+        <h3>本机地址（用于在 ZeroTier Central 授权）</h3>
+        <p class="hint">在 central.zerotier.com 打开你的网络，将 <b class="mono" id="ov-address2">本机地址</b> 添加为已授权设备即可完成互联。</p>
+        <div class="join-row">
+          <input id="ov-networkId" class="input" placeholder="输入 16 位网络 ID 加入网络，例如 8056c2e21c000001" />
+          <button class="btn btn-primary" id="btnJoinQuick">加入网络</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- NETWORKS -->
+    <section class="view hidden" id="view-networks">
+      <div class="section-head">
+        <h2>网络</h2>
+        <button class="btn" id="btnRefreshNet">刷新</button>
+      </div>
+      <div class="join-row panel">
+        <input id="joinId" class="input" placeholder="输入网络 ID（16 位十六进制）" />
+        <button class="btn btn-primary" id="btnJoin2">加入网络</button>
+      </div>
+      <div id="networkList" class="list"></div>
+      <div id="netEmpty" class="empty hidden">尚未加入任何网络，在上方输入网络 ID 后点「加入网络」。</div>
+    </section>
+
+    <!-- PEERS -->
+    <section class="view hidden" id="view-peers">
+      <div class="section-head">
+        <h2>对端设备 (VL1 Peers)</h2>
+        <button class="btn" id="btnRefreshPeers">刷新</button>
+      </div>
+      <div id="peerList" class="list"></div>
+      <div id="peerEmpty" class="empty hidden">暂无已知对端设备。</div>
+    </section>
+
+    <!-- SUBNET ROUTING -->
+    <section class="view hidden" id="view-subnet">
+      <div class="section-head">
+        <h2>子网路由</h2>
+        <span class="net-status offline" id="subnetBadge">未开启</span>
+      </div>
+      <p class="hint">
+        把这个 NAS 所在的局域网共享给 ZeroTier 里的其他设备。开启后，任何已加入该网络的设备都能直接访问
+        <b class="mono" id="subnetPhyLabel">本机网段</b> 里的共享文件夹、打印机、路由器等。
+        本机会自动配置 IP 转发与 NAT，并在 ZeroTier 网络上登记托管路由。
+      </p>
+
+      <div class="card">
+        <h3>1. 要共享的本机网卡（可多选）</h3>
+        <div id="subnetPhy" class="iface-list"></div>
+        <div class="field-row">
+          <label class="field-label">将对 ZeroTier 广播的网段</label>
+          <span id="subnetTarget" class="mono subnet-target-auto">按所选网卡自动生成</span>
+        </div>
+        <p class="hint">
+          一个网段只需勾选一张网卡：同网段的其他网卡会被自动一并配置（内核可能从任一网卡转发，
+          只配一张会导致部分流量不通）。广播网段取比实际网段宽一位的写法（官方建议），
+          同一网段只登记一条托管路由。
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>2. 通过哪个 ZeroTier 网络共享</h3>
+        <select class="input" id="subnetNet"></select>
+      </div>
+
+      <div class="card">
+        <h3>3. ZeroTier Central API Token</h3>
+        <p class="hint">
+          托管路由只能由网络的控制方添加，所以需要你的令牌代你写入。令牌只保存在 NAS 上（权限 600），不会回传到浏览器。
+          在 <b>my.zerotier.com</b> → Account → API Access Tokens 生成。
+          若该网络由本机自建控制器托管，则可以留空。
+        </p>
+        <div class="join-row">
+          <input class="input" id="subnetToken" type="password" placeholder="粘贴 API Token（留空则不修改已保存的）" />
+          <button class="btn" id="btnToggleToken" title="显示/隐藏">显示</button>
+          <button class="btn" id="btnSaveToken">保存令牌</button>
+          <button class="btn" id="btnClearToken">清除</button>
+        </div>
+        <div class="hint" id="subnetTokenState">—</div>
+      </div>
+
+      <div class="join-row">
+        <button class="btn btn-primary" id="btnSubnetOn">开启子网路由</button>
+        <button class="btn btn-danger" id="btnSubnetOff">关闭子网路由</button>
+      </div>
+
+      <div class="card">
+        <h3>当前状态</h3>
+        <div id="subnetStatus" class="subnet-status">尚未开启。</div>
+      </div>
+
+      <div class="card">
+        <h3>执行结果</h3>
+        <div id="subnetLog" class="subnet-log">—</div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="js/app.js"></script>
+</body>
+</html>

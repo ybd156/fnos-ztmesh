@@ -1,0 +1,87 @@
+#!/bin/bash
+# install_callback — invoked by fnOS AFTER the package files are installed.
+# Prepares permissions and the persistent runtime directories.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-install.log}"
+log(){ echo "[${APPNAME}/install_callback] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== install_callback start (APPDEST=$APPDEST) ==="
+
+# --- 1. executable bits ---------------------------------------------------
+# fpk archives do not reliably carry POSIX mode bits, so set them explicitly.
+# --- locate cmd/main ------------------------------------------------------
+# fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
+# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
+# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+find_main(){
+  local c
+  for c in "/var/apps/$APPNAME/cmd/main" \
+           "${TRIM_PKGMETA:+$(dirname "$TRIM_PKGMETA")/cmd/main}" \
+           "$(dirname "$APPDEST")/cmd/main" \
+           "$APPDEST/cmd/main"; do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MAIN="$(find_main)" || MAIN=""
+APPROOT="${MAIN%/cmd/main}"
+[ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+chmod 0755 "$APPDEST/zt/zerotier-one" 2>>"$LOG" || log "chmod zerotier-one failed"
+if [ -d "$APPROOT/cmd" ]; then
+  chmod 0755 "$APPROOT"/cmd/* 2>>"$LOG" || log "chmod cmd/* failed"
+fi
+
+# --- 2. persistent directories -------------------------------------------
+mkdir -p "$PKGVAR/zt" "$PKGTMP" 2>>"$LOG"
+# zerotier keeps its node identity (identity.secret) here — must stay private
+chmod 0700 "$PKGVAR/zt" 2>>"$LOG"
+# The daemon deliberately drops privileges unless its home directory is owned
+# by root, and it cannot create the TUN interface without root. Force ownership
+# so it always keeps the privileges it needs.
+chown root:root "$PKGVAR/zt" 2>>"$LOG" || log "chown $PKGVAR/zt failed"
+
+# --- 3. report an existing node address ----------------------------------
+# identity.public is "<10 hex address>:0:<public key>"; the address is the
+# node's stable ZeroTier identity, so read it directly rather than invoking
+# the binary (its -i mode is the idtool, not an address printer).
+if [ -f "$PKGVAR/zt/identity.public" ]; then
+  ADDR="$(cut -c1-10 < "$PKGVAR/zt/identity.public" 2>/dev/null)"
+  [ -n "$ADDR" ] && log "existing node address: $ADDR"
+fi
+
+# --- 4. queue the network chosen in the install wizard --------------------
+# $wizard_network_id is provided by wizard/install. It is re-validated here
+# because lifecycle scripts must never trust input blindly; cmd/main joins it
+# on the first daemon start and then clears the queue.
+if [ -n "${wizard_network_id:-}" ]; then
+  case "$wizard_network_id" in
+    *[!0-9a-fA-F]*)
+      log "wizard_network_id is not hexadecimal; ignored"
+      ;;
+    *)
+      if [ "${#wizard_network_id}" -eq 16 ]; then
+        mkdir -p "$PKGVAR"
+        printf '%s\n' "$wizard_network_id" > "$PKGVAR/pending_network"
+        log "queued network join for $wizard_network_id"
+      else
+        log "wizard_network_id length is not 16; ignored"
+      fi
+      ;;
+  esac
+fi
+
+# --- 5. record installed version ------------------------------------------
+VERSION_FILE="$PKGVAR/VERSION"
+if [ -f "$APPROOT/manifest" ]; then
+  sed -n 's/^version=//p' "$APPROOT/manifest" > "$VERSION_FILE" 2>>"$LOG"
+  log "recorded version: $(cat "$VERSION_FILE" 2>/dev/null)"
+fi
+
+log "=== install_callback ok ==="
+exit 0

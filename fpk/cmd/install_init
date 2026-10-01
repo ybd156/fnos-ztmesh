@@ -1,0 +1,63 @@
+#!/bin/bash
+# install_init — invoked by fnOS BEFORE the package files are installed.
+# Exit 0 to continue the installation, non-zero to abort it.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-install.log}"
+log(){ echo "[${APPNAME}/install_init] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== install_init start ==="
+
+# --- 1. architecture guard -------------------------------------------------
+# The bundled ZeroTier One daemon is a x86-64 ELF binary.
+ARCH="$(uname -m)"
+log "uname -m = $ARCH"
+case "$ARCH" in
+  x86_64|amd64) : ;;
+  *)
+    log "ERROR: unsupported architecture '$ARCH' (this package ships x86-64 only)"
+    echo "此安装包仅支持 x86-64 架构，当前设备为 $ARCH。"
+    exit 1
+    ;;
+esac
+
+# --- 2. tun driver --------------------------------------------------------
+# ZeroTier creates a TUN interface; the device node must exist.
+if [ ! -e /dev/net/tun ]; then
+  log "/dev/net/tun is missing, attempting modprobe tun"
+  if [ -d /dev/net ] || mkdir -p /dev/net 2>/dev/null; then
+    modprobe tun >>"$LOG" 2>&1 || log "modprobe tun returned $?"
+    [ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 >>"$LOG" 2>&1 || true
+  fi
+fi
+if [ -c /dev/net/tun ]; then
+  log "/dev/net/tun is available"
+else
+  log "WARNING: /dev/net/tun still unavailable; ZeroTier will fail to create interfaces"
+fi
+
+# --- 3. dependency check --------------------------------------------------
+# nodejs_v22 is pulled in through manifest install_dep_apps, but that only
+# installs it — its target/bin is not automatically on PATH, so probe the
+# known dependency locations exactly like cmd/main's resolve_node does.
+NODE_BIN=""
+if command -v node >/dev/null 2>&1; then
+  NODE_BIN="$(command -v node)"
+else
+  for cand in /var/apps/nodejs_v22/target/bin/node \
+              /var/apps/nodejs*/target/bin/node \
+              /vol*/@appcenter/nodejs*/target/bin/node \
+              /var/apps/nodejs*/bin/node; do
+    if [ -x "$cand" ]; then NODE_BIN="$cand"; break; fi
+  done
+fi
+if [ -n "$NODE_BIN" ]; then
+  log "node runtime: $NODE_BIN ($("$NODE_BIN" --version 2>/dev/null))"
+else
+  log "WARNING: no node runtime found; the management UI cannot start"
+  log "         expected the nodejs_v22 dependency at /var/apps/nodejs_v22/target/bin"
+fi
+
+log "=== install_init ok ==="
+exit 0

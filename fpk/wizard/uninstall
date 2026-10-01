@@ -1,0 +1,21 @@
+[
+  {
+    "stepTitle": "卸载 ZeroTier异地组网-虚拟局域网",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "卸载时会自动撤离 ZeroTier 网络上的托管路由、清理本机转发规则并停止服务。请选择如何处理本机的节点数据：保留后重新安装会沿用原节点身份，ZeroTier 网络里无需重新授权；删除后重新安装会生成全新节点，需要重新授权。"
+      },
+      {
+        "type": "select",
+        "field": "wizard_remove_data",
+        "label": "节点与配置数据",
+        "initValue": "0",
+        "options": [
+          { "label": "保留数据（推荐）：重装后继续使用原节点身份", "value": "0" },
+          { "label": "删除所有数据：节点身份、API 令牌、子网路由配置一并清除", "value": "1" }
+        ]
+      }
+    ]
+  }
+]

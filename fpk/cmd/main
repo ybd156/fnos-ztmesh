@@ -1,0 +1,583 @@
+#!/bin/bash
+# ZeroTier fnOS lifecycle script
+# Commands: start | stop | status | restart
+
+# --- resolve standard fnOS paths -----------------------------------------
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
+ETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
+
+# --- resolved sub-paths ---------------------------------------------------
+ZT_DIR="${PKGVAR}/zt"                 # persistent zerotier working directory (identity lives here)
+ZT_BIN="${APPDEST}/zt/zerotier-one"   # zerotier daemon binary
+# ZeroTier local API + UDP listen port. It is deliberately NOT 9993: this
+# package is designed to coexist with the independently published "ZeroTier" app,
+# whose daemon binds 9993; two daemons on the same host need distinct ports.
+ZT_API_PORT=19993
+WEB_APP_DIR="${APPDEST}/www"
+WEB_SERVER="${APPDEST}/server/server.js"
+NODE="node"
+
+ZT_PIDFILE="${PKGTMP}/zerotier-one.pid"
+WEB_PIDFILE="${PKGTMP}/web.pid"
+ZT_PORTFILE="${ZT_DIR}/zerotier-one.port"
+
+MAIN_LOG="${TRIM_TEMP_LOGFILE:-/tmp/ztmesh-main.log}"
+log(){ echo "[ztmesh] $*" >> "$MAIN_LOG"; }
+
+# is_pid_alive <pid> -> 0 alive, 1 dead
+is_pid_alive(){
+  local p="$1"
+  [ -n "$p" ] && [ -d "/proc/$p" ] && return 0
+  return 1
+}
+
+zt_is_running(){
+  local pid
+  pid=$(cat "$ZT_PIDFILE" 2>/dev/null)
+  is_pid_alive "$pid" && return 0
+  return 1
+}
+
+web_is_running(){
+  local pid
+  pid=$(cat "$WEB_PIDFILE" 2>/dev/null)
+  is_pid_alive "$pid" && return 0
+  return 1
+}
+
+# --- runtime discovery ----------------------------------------------------
+
+# install_dep_apps=nodejs_v22 only guarantees that the dependency is installed;
+# per the fnOS docs the caller must put its target/bin on PATH, so resolve the
+# interpreter explicitly instead of assuming a bare `node` resolves.
+resolve_node(){
+  local cand
+  cand=$(command -v node 2>/dev/null)
+  if [ -n "$cand" ]; then
+    NODE="$cand"
+    return 0
+  fi
+  for cand in /var/apps/nodejs_v22/target/bin/node \
+              /var/apps/nodejs*/target/bin/node \
+              /vol*/@appcenter/nodejs*/target/bin/node \
+              /var/apps/nodejs*/bin/node; do
+    if [ -x "$cand" ]; then
+      NODE="$cand"
+      PATH="$(dirname "$cand"):$PATH"
+      export PATH
+      log "resolved node: $cand"
+      return 0
+    fi
+  done
+  log "node runtime not found"
+  return 1
+}
+
+# PID of the running zerotier-one, without depending on pgrep being installed.
+find_zt_pid(){
+  local p pid exe
+  if command -v pgrep >/dev/null 2>&1; then
+    pid=$(pgrep -f "^$ZT_BIN" 2>/dev/null | head -n1)
+    if [ -n "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+  fi
+  for p in /proc/[0-9]*; do
+    exe=$(readlink "$p/exe" 2>/dev/null) || continue
+    if [ "$exe" = "$ZT_BIN" ]; then
+      basename "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+start_zerotier(){
+  # ensure persistent working directory
+  mkdir -p "$ZT_DIR" "$PKGTMP"
+  chmod 700 "$ZT_DIR"
+  if zt_is_running; then
+    log "zerotier-one already running"
+    return 0
+  fi
+  # remove stale pid/socket
+  rm -f "$ZT_PIDFILE" "$ZT_PORTFILE" "$PKGTMP/zerotier-one.sock"
+  # Launch the daemon. It must stay root: it creates the TUN interface and
+  # edits the routing table. ZeroTier voluntarily drops privileges when its
+  # home directory is not owned by root, which would break interface creation
+  # (and there is a FATAL path when the drop fails), so -U is passed to keep
+  # root explicitly. The home directory is the trailing positional argument.
+  "$ZT_BIN" -d -U -p"$ZT_API_PORT" "$ZT_DIR"
+  # wait for API socket/token to appear
+  local i=0
+  while [ $i -lt 30 ]; do
+    if [ -f "$ZT_DIR/authtoken.secret" ] && [ -f "$ZT_PORTFILE" ]; then
+      break
+    fi
+    sleep 1
+    i=$((i+1))
+  done
+  # record pid
+  local pid
+  pid=$(find_zt_pid)
+  if [ -n "$pid" ]; then
+    echo "$pid" > "$ZT_PIDFILE"
+    log "zerotier-one started (pid $pid)"
+    join_pending_network
+    return 0
+  fi
+  log "failed to start zerotier-one"
+  return 1
+}
+
+# Join the network queued by the install/config wizard, then clear the queue.
+# The wizard answer arrives as the env var $wizard_network_id; the lifecycle
+# scripts store it in $PKGVAR/pending_network for the daemon to pick up.
+join_pending_network(){
+  local f="${PKGVAR}/pending_network"
+  [ -f "$f" ] || return 0
+  local nid
+  nid=$(tr -d ' \t\r\n' < "$f" 2>/dev/null)
+  case "$nid" in
+    *[!0-9a-fA-F]*|"")
+      log "queued network id is not hexadecimal; discarding"
+      rm -f "$f"
+      return 0
+      ;;
+  esac
+  if [ "${#nid}" -ne 16 ]; then
+    log "queued network id '$nid' is not 16 chars; discarding"
+    rm -f "$f"
+    return 0
+  fi
+  local rc=1
+  # zerotier-cli locates its home directory from argv[0], so it must be
+  # invoked through a path inside ZT_DIR. The daemon normally creates this
+  # symlink itself; create it here so auto-join never races the daemon.
+  local cli="${ZT_DIR}/zerotier-cli"
+  [ -e "$cli" ] || ln -sf "$ZT_BIN" "$cli" 2>/dev/null
+  if [ -x "$cli" ]; then
+    "$cli" join "$nid" >>"$MAIN_LOG" 2>&1
+    rc=$?
+  else
+    log "zerotier-cli unavailable; cannot auto-join $nid"
+  fi
+  log "auto-join network $nid -> rc=$rc"
+  [ "$rc" -eq 0 ] && rm -f "$f"
+  return 0
+}
+
+start_web(){
+  if web_is_running; then
+    log "web server already running"
+    return 0
+  fi
+  if ! resolve_node; then
+    log "cannot start web UI: no node runtime found"
+    return 1
+  fi
+  rm -f "$WEB_PIDFILE"
+  # launch node backend serving static UI + proxying to zerotier API.
+  # The resolved paths are exported so server.js never has to re-derive them.
+  TRIM_APPNAME="$APPNAME" \
+  TRIM_APPDEST="$APPDEST" \
+  TRIM_PKGVAR="$PKGVAR" \
+  TRIM_PKGTMP="$PKGTMP" \
+  TRIM_PKGETC="$ETC" \
+  TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT:-3443}" \
+  nohup "$NODE" "$WEB_SERVER" >>"$MAIN_LOG" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$WEB_PIDFILE"
+  log "web server started (pid $pid, node $NODE)"
+  return 0
+}
+
+stop_zerotier(){
+  if ! zt_is_running; then
+    rm -f "$ZT_PIDFILE"
+    return 0
+  fi
+  local pid
+  pid=$(cat "$ZT_PIDFILE" 2>/dev/null)
+  if is_pid_alive "$pid"; then
+    kill "$pid" 2>/dev/null
+    local i=0
+    while is_pid_alive "$pid" && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+    is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null
+  fi
+  rm -f "$ZT_PIDFILE" "$ZT_PORTFILE" "$PKGTMP/zerotier-one.sock"
+  log "zerotier-one stopped"
+}
+
+stop_web(){
+  if ! web_is_running; then
+    rm -f "$WEB_PIDFILE"
+    return 0
+  fi
+  local pid
+  pid=$(cat "$WEB_PIDFILE" 2>/dev/null)
+  if is_pid_alive "$pid"; then
+    kill "$pid" 2>/dev/null
+    local i=0
+    while is_pid_alive "$pid" && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+    is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null
+  fi
+  rm -f "$WEB_PIDFILE"
+  log "web server stopped"
+}
+
+# --- subnet routing -------------------------------------------------------
+# Lets ZeroTier members reach the physical LAN this NAS sits on (printers, the
+# NAS's own shares, the router, ...).  The other half of the job -- the managed
+# route that tells the network to send that subnet here -- is done over the
+# ZeroTier Central API by server.js, because route authority lives with the
+# network controller.
+#
+# This half has to be re-applied on every start: iptables rules do not survive
+# a reboot, and neither does net.ipv4.ip_forward if the appliance resets it.
+# The desired setup is remembered in $SUBNET_CONF, written by /api/subnet/enable.
+SUBNET_CONF="${PKGVAR}/subnet.conf"
+SUBNET_LOG="${PKGVAR}/subnet.log"
+
+# Read one KEY=value out of the config without sourcing it (the file is written
+# by the web layer, so it is parsed rather than executed).  Values containing a
+# list (PHY_IFACES) are stored quoted; strip one pair of surrounding quotes.
+subnet_get(){
+  sed -n "s/^$1=//p" "$SUBNET_CONF" 2>/dev/null | head -n1 | sed 's/^"//;s/"$//'
+}
+
+# Defence in depth: the web layer validates names strictly before they reach us;
+# here we reject the arguments that would still hurt if they slipped through --
+# a leading dash would be parsed as an iptables option, a slash is not a legal
+# interface name, and whitespace would change how the list is re-split.
+valid_iface_name(){
+  local n="${1:-}"
+  [ -n "$n" ] && [ ${#n} -le 32 ] || return 1
+  case "$n" in
+    -*|*/*) return 1 ;;
+    *[[:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+# "Let the replies come back" rule.  The same conntrack match has a modern and
+# a legacy spelling; not every iptables build ships both, so try each in turn.
+subnet_add_related(){
+  local phy="$1" zt="$2"
+  iptables -C FORWARD -i "$phy" -o "$zt" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null && return 0
+  iptables -C FORWARD -i "$phy" -o "$zt" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null && return 0
+  iptables -A FORWARD -i "$phy" -o "$zt" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null && return 0
+  iptables -A FORWARD -i "$phy" -o "$zt" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null && return 0
+  return 1
+}
+
+subnet_del_related(){
+  local phy="$1" zt="$2"
+  iptables -D FORWARD -i "$phy" -o "$zt" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+  iptables -D FORWARD -i "$phy" -o "$zt" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+  return 0
+}
+
+# Report the state of one physical interface on one machine-readable line.
+# Connected IPv4 subnet of an interface, e.g. "192.168.250.0/24" (empty if none).
+phy_subnet(){
+  local s
+  s=$(ip -4 route show dev "$1" proto kernel scope link 2>/dev/null | awk 'NR==1{print $1}')
+  [ -n "$s" ] || s=$(ip -4 route show dev "$1" scope link 2>/dev/null | awk 'NR==1{print $1}')
+  echo "$s"
+}
+
+# --- policy routing guard ---------------------------------------------------
+# fnOS multi-NIC boxes use source-based policy routing, e.g.
+#   ip rule: from 192.168.250.3 lookup route_ens18
+# and those per-NIC tables only hold a default route. A reply the NAS sends
+# FROM its LAN address TO a tunnel client would match those rules and be
+# thrown out of the physical NIC to the gateway, where the private ZT
+# destination dies. Pin every destination reachable via the tunnel interface
+# to the main table, ahead of the source-based rules (fnOS uses pref 10/11).
+ZT_RULE_PREF=5
+
+subnet_fix_policy_rules(){
+  local zt="$1" dst
+  subnet_unfix_policy_rules
+  ip -4 route show dev "$zt" 2>/dev/null | awk '/^[0-9]/{print $1}' | \
+  while read -r dst; do
+    ip rule add to "$dst" lookup main pref $ZT_RULE_PREF 2>/dev/null
+  done
+  echo "policy_rules=main_table_pref$ZT_RULE_PREF"
+  return 0
+}
+
+subnet_unfix_policy_rules(){
+  local line dst
+  ip rule show 2>/dev/null | grep "^$ZT_RULE_PREF:" | grep ' lookup main$' | \
+  while read -r line; do
+    dst=$(echo "$line" | sed -n 's/.* to \([^ ]*\) .*/\1/p')
+    [ -n "$dst" ] && ip rule del to "$dst" lookup main pref $ZT_RULE_PREF 2>/dev/null
+  done
+  return 0
+}
+
+subnet_report_phy(){
+  local phy="$1" zt="$2" out_ok=0 ret_ok=0 line sn
+  iptables -C FORWARD -i "$zt" -o "$phy" -j ACCEPT 2>/dev/null && out_ok=1
+  if iptables -C FORWARD -i "$phy" -o "$zt" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+     || iptables -C FORWARD -i "$phy" -o "$zt" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+    ret_ok=1
+  fi
+  line="phy=$phy"
+  sn=$(phy_subnet "$phy")
+  if [ -n "$sn" ] && iptables -t nat -C POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE 2>/dev/null; then
+    line="$line nat_rule=present"
+  else
+    line="$line nat_rule=missing"
+  fi
+  if [ "$out_ok" = 1 ] && [ "$ret_ok" = 1 ]; then
+    line="$line forward_rules=present"
+  else
+    line="$line forward_rules=missing"
+  fi
+  echo "$line"
+}
+
+# Apply NAT + forwarding for every selected physical interface.
+#   subnet_apply <zerotier-iface> <physical-iface> [physical-iface ...]
+# Several physical NICs can sit in the SAME subnet (multi-homed box): rules are
+# still needed per interface, because the kernel is free to pick either NIC when
+# it forwards and the FORWARD policy is DROP.
+subnet_apply(){
+  local zt="$1"; shift
+  if [ -z "$zt" ] || [ $# -lt 1 ]; then
+    echo "subnet-up: need <zerotier-iface> <physical-iface> [physical-iface ...]" >&2
+    return 2
+  fi
+  local phy
+  valid_iface_name "$zt" || { echo "subnet-up: 非法隧道网卡名 '$zt'" >&2; return 2; }
+  for phy in "$@"; do
+    valid_iface_name "$phy" || { echo "subnet-up: 非法网卡名 '$phy'" >&2; return 2; }
+  done
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "iptables 不可用，无法配置 NAT 转发" >&2
+    return 3
+  fi
+  # Core of the trick, per interface: forward between the two interfaces, and
+  # rewrite the source of tunnel traffic so LAN devices know where to reply.
+  # -C first keeps repeated starts from stacking duplicate rules.
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+  subnet_fix_policy_rules "$zt"
+  local fail=0 sn
+  for phy in "$@"; do
+    # Drop the unrestricted rule left by older versions: it also masqueraded
+    # the NAS's own LAN traffic, which breaks access to the box's own IP on
+    # multi-homed hosts (reply leaves via the other NIC, source gets rewritten).
+    while iptables -t nat -C POSTROUTING -o "$phy" -j MASQUERADE 2>/dev/null; do
+      iptables -t nat -D POSTROUTING -o "$phy" -j MASQUERADE
+    done
+    sn=$(phy_subnet "$phy")
+    if [ -z "$sn" ]; then
+      echo "phy=$phy 无法确定本网段，跳过 NAT 规则" >&2
+      fail=1
+    else
+      # '! -s <own subnet>': only tunnel/foreign traffic is masqueraded; the
+      # NAS's own LAN packets keep their source address untouched.
+      iptables -t nat -C POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE 2>/dev/null \
+        || iptables -t nat -A POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE || fail=1
+    fi
+    subnet_add_related "$phy" "$zt" || fail=1
+    iptables -C FORWARD -i "$zt" -o "$phy" -j ACCEPT 2>/dev/null \
+      || iptables -A FORWARD -i "$zt" -o "$phy" -j ACCEPT || fail=1
+  done
+  local fwd all_nat=1 all_fwd=1 line
+  fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
+  echo "ip_forward=${fwd:-unknown}"
+  for phy in "$@"; do
+    line=$(subnet_report_phy "$phy" "$zt")
+    echo "$line"
+    case "$line" in *nat_rule=missing*) all_nat=0 ;; esac
+    case "$line" in *forward_rules=missing*) all_fwd=0 ;; esac
+  done
+  # Aggregate lines: present only when EVERY interface has the rule.
+  [ "$all_nat" = 1 ] && echo "nat_rule=present" || echo "nat_rule=missing"
+  [ "$all_fwd" = 1 ] && echo "forward_rules=present" || echo "forward_rules=missing"
+  # Never claim success unless the rules are demonstrably in every table.
+  [ "$fail" = 0 ] && [ "$all_nat" = 1 ] && [ "$all_fwd" = 1 ] || return 1
+  return 0
+}
+
+subnet_remove(){
+  local zt="$1"; shift
+  if [ $# -lt 1 ]; then
+    echo "subnet-down: need <zerotier-iface> <physical-iface> [physical-iface ...]" >&2
+    return 2
+  fi
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "iptables 不可用" >&2
+    return 3
+  fi
+  local phy sn
+  for phy in "$@"; do
+    sn=$(phy_subnet "$phy")
+    if [ -n "$sn" ]; then
+      while iptables -t nat -C POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE 2>/dev/null; do
+        iptables -t nat -D POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE
+      done
+    fi
+    # legacy unrestricted rule from older versions
+    while iptables -t nat -C POSTROUTING -o "$phy" -j MASQUERADE 2>/dev/null; do
+      iptables -t nat -D POSTROUTING -o "$phy" -j MASQUERADE
+    done
+    subnet_del_related "$phy" "$zt" 2>/dev/null
+    iptables -D FORWARD -i "$zt" -o "$phy" -j ACCEPT 2>/dev/null
+    echo "phy=$phy rules=removed"
+  done
+  subnet_unfix_policy_rules
+  return 0
+}
+
+# Re-apply after a start or reboot.  Rules may name an interface that has not
+# come up yet; iptables stores interface names as plain strings, so the rules
+# simply start matching once the tunnel device appears.
+apply_subnet_on_boot(){
+  [ -f "$SUBNET_CONF" ] || return 0
+  local phys zt rc
+  phys=$(subnet_get PHY_IFACES)
+  [ -n "$phys" ] || phys=$(subnet_get PHY_IFACE)
+  zt=$(subnet_get ZT_IFACE)
+  if [ -z "$phys" ] || [ -z "$zt" ]; then
+    log "subnet.conf incomplete (phys='$phys' zt='$zt'); skipping"
+    return 0
+  fi
+  # $phys is deliberately unquoted: it is the saved space-separated name list.
+  subnet_apply "$zt" $phys >>"$SUBNET_LOG" 2>&1
+  rc=$?
+  log "subnet routing re-applied: zt=$zt phys=$phys rc=$rc"
+  return 0
+}
+
+case "$1" in
+  start)
+    start_zerotier
+    zr=$?
+    start_web
+    wr=$?
+    apply_subnet_on_boot
+    if [ $zr -eq 0 ] && [ $wr -eq 0 ]; then exit 0; else exit 1; fi
+    ;;
+  stop)
+    stop_web
+    stop_zerotier
+    exit 0
+    ;;
+  restart)
+    stop_web; stop_zerotier; sleep 1
+    start_zerotier; zr=$?; start_web; wr=$?
+    apply_subnet_on_boot
+    if [ $zr -eq 0 ] && [ $wr -eq 0 ]; then exit 0; else exit 1; fi
+    ;;
+  zt-start)
+    # daemon only: used by the web UI so that stopping the daemon does not
+    # take the management UI down with it
+    start_zerotier
+    exit $?
+    ;;
+  zt-stop)
+    stop_zerotier
+    exit 0
+    ;;
+  set-option)
+    # Per-network local options (allowManaged/allowGlobal/allowDefault/allowDNS),
+    # applied through the official CLI so the semantics are ZeroTier's own.
+    nwid="${2:-}"
+    opt="${3:-}"
+    val="${4:-}"
+    case "$nwid" in
+      *[!0-9a-fA-F]*|"") log "set-option: invalid network id '$nwid'"; exit 1 ;;
+    esac
+    if [ "${#nwid}" -ne 16 ]; then
+      log "set-option: network id '$nwid' is not 16 chars"
+      exit 1
+    fi
+    case "$opt" in
+      allowManaged|allowGlobal|allowDefault|allowDNS) : ;;
+      *) log "set-option: option '$opt' is not allowed"; exit 1 ;;
+    esac
+    case "$val" in
+      0|1) : ;;
+      *) log "set-option: value '$val' must be 0 or 1"; exit 1 ;;
+    esac
+    setopt_cli="${ZT_DIR}/zerotier-cli"
+    [ -e "$setopt_cli" ] || ln -sf "$ZT_BIN" "$setopt_cli" 2>/dev/null
+    if [ ! -x "$setopt_cli" ]; then
+      log "set-option: zerotier-cli unavailable"
+      exit 1
+    fi
+    log "set-option: $nwid $opt=$val"
+    # Capture the CLI's output and echo it: the web layer returns this to the UI
+    # so a failure is diagnosable instead of a bare HTTP 500.
+    out="$("$setopt_cli" set "$nwid" "$opt=$val" 2>&1)"
+    rc=$?
+    log "set-option: rc=$rc out=$out"
+    [ -n "$out" ] && echo "$out"
+    exit $rc
+    ;;
+  subnet-up)
+    # Configure NAT + forwarding for every selected LAN interface.
+    zt="${2:-}"
+    shift 2 2>/dev/null || shift "$#"
+    subnet_apply "$zt" "$@"
+    exit $?
+    ;;
+  subnet-down)
+    zt="${2:-}"
+    shift 2 2>/dev/null || shift "$#"
+    subnet_remove "$zt" "$@"
+    exit $?
+    ;;
+  subnet-cleanup)
+    # Tear down using the saved config: at uninstall time the web UI is gone and
+    # cannot tell us which interfaces were involved.
+    cphys="$(subnet_get PHY_IFACES)"
+    [ -n "$cphys" ] || cphys="$(subnet_get PHY_IFACE)"
+    czt="$(subnet_get ZT_IFACE)"
+    if [ -z "$cphys" ]; then
+      echo "subnet-cleanup: 没有保存的子网路由配置，无需清理"
+      rm -f "$SUBNET_CONF"
+      exit 0
+    fi
+    # unquoted $cphys: saved space-separated name list
+    subnet_remove "$czt" $cphys
+    rc=$?
+    rm -f "$SUBNET_CONF"
+    log "subnet-cleanup: zt=$czt phys=$cphys rc=$rc"
+    exit $rc
+    ;;
+  subnet-status)
+    # Read-only report: ip_forward once, then one line per physical interface.
+    zt="${2:-}"
+    shift 2 2>/dev/null || shift "$#"
+    fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
+    echo "ip_forward=${fwd:-unknown}"
+    allnat=1; allfwd=1
+    for phy in "$@"; do
+      line=$(subnet_report_phy "$phy" "$zt")
+      echo "$line"
+      case "$line" in *nat_rule=missing*) allnat=0 ;; esac
+      case "$line" in *forward_rules=missing*) allfwd=0 ;; esac
+    done
+    [ "$allnat" = 1 ] && echo "nat_rule=present" || echo "nat_rule=missing"
+    [ "$allfwd" = 1 ] && echo "forward_rules=present" || echo "forward_rules=missing"
+    exit 0
+    ;;
+  status)
+    if zt_is_running && web_is_running; then exit 0; fi
+    exit 3
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status|zt-start|zt-stop|set-option|subnet-up|subnet-down|subnet-cleanup|subnet-status}" >&2
+    exit 1
+    ;;
+esac

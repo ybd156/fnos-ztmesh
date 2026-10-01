@@ -1,0 +1,23 @@
+[
+  {
+    "stepTitle": "ZeroTier异地组网-虚拟局域网 安装",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "安装完成后 ZeroTier 服务会自动启动，并从飞牛应用中心打开管理界面。你可以现在就填写要加入的虚拟网络 ID（16 位十六进制），也可以稍后在应用界面中添加；网络 ID 可在 ZeroTier 官网 my.zerotier.com 的 Network 页面找到。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_network_id",
+        "label": "要加入的网络 ID（可留空）",
+        "initValue": "",
+        "rules": [
+          {
+            "pattern": "^([0-9a-fA-F]{16})?$",
+            "message": "网络 ID 必须是 16 位十六进制字符，或者留空"
+          }
+        ]
+      }
+    ]
+  }
+]

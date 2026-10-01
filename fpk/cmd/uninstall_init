@@ -1,0 +1,97 @@
+#!/bin/bash
+# uninstall_init — invoked by fnOS BEFORE the package is removed.
+# Withdraws subnet routing, stops the service and removes sockets/pids. The node
+# identity in $TRIM_PKGVAR/zt is PRESERVED unless the user picked "删除所有数据"
+# in the uninstall wizard (wizard_remove_data=1). Set REMOVE_DATA=1 (or pass
+# "purge" as $1) to force a wipe without the wizard.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
+# --- locate cmd/main ------------------------------------------------------
+# fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
+# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
+# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+find_main(){
+  local c
+  for c in "/var/apps/$APPNAME/cmd/main" \
+           "${TRIM_PKGMETA:+$(dirname "$TRIM_PKGMETA")/cmd/main}" \
+           "$(dirname "$APPDEST")/cmd/main" \
+           "$APPDEST/cmd/main"; do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MAIN="$(find_main)" || MAIN=""
+APPROOT="${MAIN%/cmd/main}"
+[ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+WEB_SERVER="$APPDEST/server/server.js"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-uninstall.log}"
+log(){ echo "[${APPNAME}/uninstall_init] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== uninstall_init start ==="
+
+# --- 1. withdraw subnet routing --------------------------------------------
+# 开启过“转发当前网段”的话，本机会有 iptables 转发规则，ZeroTier 网络上还会有一条
+# 指向本机的托管路由。两者都必须清掉：本机规则会继续为一个已经不存在的应用转发流量，
+# 而托管路由指向一个已卸载的节点，会让整个网段对网络里所有设备黑洞（官方文档亦如此
+# 说明）。这一步必须在停服务之前做 —— 它要和还在运行的 ZeroTier 守护进程（以及
+# ZeroTier Central）通信。
+find_node(){
+  local n
+  n="$(command -v node 2>/dev/null)" && [ -n "$n" ] && [ -x "$n" ] && { echo "$n"; return 0; }
+  for n in /var/apps/nodejs_v22/target/bin/node /var/apps/nodejs*/target/bin/node \
+           /vol*/@appcenter/nodejs*/target/bin/node /var/apps/nodejs*/bin/node; do
+    [ -x "$n" ] && { echo "$n"; return 0; }
+  done
+  return 1
+}
+NODE_BIN="$(find_node || true)"
+if [ -n "$NODE_BIN" ] && [ -f "$WEB_SERVER" ]; then
+  out="$("$NODE_BIN" "$WEB_SERVER" --subnet-withdraw 2>&1)"
+  log "subnet withdraw rc=$? $out"
+else
+  log "node 或 $WEB_SERVER 不存在，跳过远端托管路由清理"
+fi
+if [ -x "$MAIN" ]; then
+  out="$("$MAIN" subnet-cleanup 2>&1)"
+  log "subnet-cleanup rc=$? $out"
+fi
+
+# --- 2. stop the service ---------------------------------------------------
+if [ -x "$MAIN" ]; then
+  "$MAIN" stop >>"$LOG" 2>&1
+  log "service stopped (rc=$?)"
+else
+  log "WARNING: $MAIN not executable, falling back to pkill"
+fi
+# belt and braces: make sure nothing survives by name
+pkill -f "$APPDEST/zt/zerotier-one" >>"$LOG" 2>&1 || true
+pkill -f "$APPDEST/server/server.js" >>"$LOG" 2>&1 || true
+sleep 1
+
+# --- 3. optional data purge ------------------------------------------------
+# The uninstall wizard answer arrives as $wizard_remove_data (see
+# wizard/uninstall). Accept the common truthy spellings so a schema change in
+# the wizard frontend cannot silently turn into a data wipe or a silent keep.
+REMOVE_DATA="${REMOVE_DATA:-0}"
+[ "${1:-}" = "purge" ] && REMOVE_DATA=1
+case "${wizard_remove_data:-}" in
+  1|true|TRUE|yes|YES|on|ON|purge) REMOVE_DATA=1 ;;
+esac
+if [ "$REMOVE_DATA" = "1" ]; then
+  log "REMOVE_DATA=1 -> deleting $PKGVAR"
+  rm -rf "$PKGVAR" >>"$LOG" 2>&1 || log "failed to remove $PKGVAR"
+else
+  log "preserving node identity under $PKGVAR/zt"
+fi
+
+# --- 4. runtime scratch ----------------------------------------------------
+rm -f "$PKGTMP/zerotier-one.pid" "$PKGTMP/web.pid" "$PKGTMP/zerotier-one.sock" 2>/dev/null
+rm -rf "$(dirname "$PKGTMP")/tmp" 2>/dev/null || true
+
+log "=== uninstall_init ok ==="
+exit 0

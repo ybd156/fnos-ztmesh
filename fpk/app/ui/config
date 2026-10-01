@@ -1,0 +1,13 @@
+{
+  ".url": {
+    "ztmesh.main": {
+      "title": "ZeroTier异地组网-虚拟局域网",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "http",
+      "port": "13443",
+      "url": "/",
+      "allUsers": true
+    }
+  }
+}

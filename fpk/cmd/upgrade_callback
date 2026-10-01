@@ -1,0 +1,57 @@
+#!/bin/bash
+# upgrade_callback — invoked by fnOS AFTER an upgrade is applied.
+# Restores permissions and brings the service back up, keeping the node identity.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}"
+PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
+# --- locate cmd/main ------------------------------------------------------
+# fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
+# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
+# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+find_main(){
+  local c
+  for c in "/var/apps/$APPNAME/cmd/main" \
+           "${TRIM_PKGMETA:+$(dirname "$TRIM_PKGMETA")/cmd/main}" \
+           "$(dirname "$APPDEST")/cmd/main" \
+           "$APPDEST/cmd/main"; do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MAIN="$(find_main)" || MAIN=""
+APPROOT="${MAIN%/cmd/main}"
+[ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-upgrade.log}"
+log(){ echo "[${APPNAME}/upgrade_callback] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== upgrade_callback start ==="
+
+# --- 1. restore executable bits on the new payload ------------------------
+chmod 0755 "$APPDEST/zt/zerotier-one" 2>>"$LOG" || log "chmod zerotier-one failed"
+if [ -d "$APPROOT/cmd" ]; then
+  chmod 0755 "$APPROOT"/cmd/* 2>>"$LOG" || log "chmod cmd/* failed"
+fi
+
+# --- 2. persistent state must survive the upgrade -------------------------
+mkdir -p "$PKGVAR/zt" "$PKGTMP" 2>>"$LOG"
+chmod 0700 "$PKGVAR/zt" 2>>"$LOG"
+if [ -f "$PKGVAR/zt/identity.secret" ]; then
+  log "node identity preserved"
+else
+  log "no existing identity; a new node address will be generated at start"
+fi
+
+# --- 3. restart ------------------------------------------------------------
+if [ -x "$MAIN" ]; then
+  "$MAIN" start >>"$LOG" 2>&1
+  log "service start rc=$?"
+else
+  log "ERROR: $MAIN not executable; service not restarted"
+fi
+
+log "=== upgrade_callback ok ==="
+exit 0

@@ -1,0 +1,9 @@
+/tools/
+/dl/
+/ztmesh.fpk
+/_fntmp/
+/test-var/
+/test-tmp/
+*.pyc
+__pycache__/
+*.log

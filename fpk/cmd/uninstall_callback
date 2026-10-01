@@ -1,0 +1,23 @@
+#!/bin/bash
+# uninstall_callback — invoked by fnOS AFTER the package has been removed.
+# Only tidies up leftovers; the payload is already gone at this point.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-uninstall.log}"
+log(){ echo "[${APPNAME}/uninstall_callback] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== uninstall_callback start ==="
+
+# make sure no process is left holding the binary or the API socket.
+# Scope to this app's install path: another ZeroTier-derived app may coexist and
+# must not be killed by an uninstall it does not belong to.
+pkill -f "$APPDEST/zt/zerotier-one" >>"$LOG" 2>&1 || true
+pkill -f "$APPDEST/server/server.js" >>"$LOG" 2>&1 || true
+
+rm -rf "$PKGTMP" >>"$LOG" 2>&1 || log "failed to remove $PKGTMP"
+
+log "=== uninstall_callback ok ==="
+exit 0

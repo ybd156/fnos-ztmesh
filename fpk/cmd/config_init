@@ -1,0 +1,22 @@
+#!/bin/bash
+# config_init — invoked by fnOS BEFORE settings/wizard changes are applied.
+# Validates the submitted settings and aborts the change if they are unusable.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-config.log}"
+log(){ echo "[${APPNAME}/config_init] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== config_init start ==="
+
+# The bundled daemon must be present and executable, otherwise settings
+# cannot ever take effect.
+if [ ! -x "$APPDEST/zt/zerotier-one" ]; then
+  log "ERROR: $APPDEST/zt/zerotier-one is missing or not executable"
+  echo "ZeroTier 程序文件缺失或不可执行，无法应用设置。"
+  exit 1
+fi
+
+log "=== config_init ok ==="
+exit 0

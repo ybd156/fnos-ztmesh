@@ -1,0 +1,198 @@
+# ZeroTier异地组网-虚拟局域网 for fnOS（飞牛）— `.fpk` 安装包
+
+把 ZeroTier One 打包成飞牛 fnOS 第三方应用「**ZeroTier异地组网-虚拟局域网**」（内部标识 `ztmesh`，开发者/发布者：移不动156，当前版本见 [CHANGELOG.md](CHANGELOG.md)）：以 root 运行守护进程，并提供中文 Web 管理界面。
+
+**交付物**：`ztmesh.fpk`（4.3 MB，含 x86-64 ZeroTier One 1.16.2 官方二进制）
+
+> **与应用商店里的 ZeroTier 共存**：应用中心已有他人发布的同名应用 ZeroTier（发布者：徐大大），本包因此使用**独立的应用标识 `ztmesh`、独立端口（Web 13443、ZeroTier 19993）和独立数据目录**，两者可以同时安装、同时运行、互不干扰。
+
+---
+
+## 安装
+
+1. 飞牛 → **应用中心 → 手动安装**，选择 `ztmesh.fpk`。
+2. 安装向导中可填写要加入的 **16 位网络 ID**（可留空，之后在界面里加也行）。
+3. 安装完成后 ZeroTier 服务会自动启动。若填了网络 ID，会在首次启动时自动加入。
+4. 从**应用中心**打开「ZeroTier异地组网-虚拟局域网」卡片进入管理界面。
+
+> 依赖 `nodejs_v22` 会在安装时自动拉取（`manifest` 的 `install_dep_apps` 声明）。
+> 包内只含 **x86-64** 二进制；`install_init` 会在非 x86-64 设备上中止安装。
+
+### 重新安装（升级本包）
+
+应用版本号遵循语义化版本规范（SemVer），从 **1.0.0** 起独立递增（不跟随内置 ZeroTier 版本），变更记录见 [CHANGELOG.md](CHANGELOG.md)；
+安装时会记录到 `$TRIM_PKGVAR/VERSION`。
+如果应用中心因为版本相同而拒绝覆盖安装，**先卸载再安装**即可：卸载默认保留 `$TRIM_PKGVAR/zt`，
+节点身份与已加入的网络不会丢（卸载向导里可选择「删除所有数据」彻底清除）。
+
+万一卸载时选择了删除数据、导致节点地址变化，在新界面的「概览」里复制新的设备地址，
+到 my.zerotier.com 的网络里重新勾选 **Auth** 授权即可。
+
+## 首次组网
+
+1. 打开管理界面 → **概览**，复制 **设备地址 (Node ID)**（形如 `a1b2c3d4e5`）。
+2. 到 [my.zerotier.com](https://my.zerotier.com) 打开你的网络 → **Members**，把这个地址添加并勾选 **Auth**（授权）。
+3. 回到界面即可看到 **已连接** 和分配到的 IP。
+
+## 功能
+
+| 界面位置 | 能力 |
+|---|---|
+| 概览 | 设备地址、在线状态、版本、已加入网络数；一键复制地址；快速加入网络 |
+| 概览 → 网络状态与流量 | 每张 `zt*` 隧道网卡的地址与**实时收/发流量**（`/proc/net/dev` 计数），可手动刷新 |
+| 网络 | 网络列表（名称 / ID / 状态 / 类型 / MAC / 已分配 IP），顶部唯一的**加入网络**入口与**手动刷新** |
+| 网络 → 每张卡片 | **接受网络路由**、**允许公网路由**、**全局 VPN 模式**、**使用网络 DNS** 四个开关（各带一句通俗说明）；**离开网络**独立置于卡片底部危险区，两步确认防误触 |
+| 对端设备 | VL1 对端列表：地址、名称、角色、延迟、版本、**当前连接的所有物理 IP**（去重、可横向滚动），右上角**手动刷新** |
+| **子网路由** | 把 NAS 所在的**物理局域网**共享给 ZeroTier 里的其他设备（一键自动配置）；API Token 默认隐藏，可点「显示」查看 |
+| 侧栏 | 服务状态指示灯 + **启动/停止服务** |
+
+「启动/停止服务」只控制 ZeroTier 守护进程，**不会**关闭管理界面本身（否则就再也点不回来了）。
+整个应用的启停由飞牛应用中心负责（`ctl_stop=true`）。
+
+**默认路由** 开启后所有流量走 ZeroTier；**网络 DNS** 用于让网络下发的 DNS 生效——异地组网、内网穿透、访问 NAS 内网服务时会用到这两个。
+
+## 转发当前网段（子网路由）
+
+ZeroTier 默认只能访问**装了 ZeroTier 的设备本身**。打开这个功能后，NAS 就成了一台
+**子网路由器**：外面（比如公司、手机 4G）的设备能直接访问 NAS 所在局域网的**整段地址**
+——同一网段里的打印机、路由器管理页、其他没装 ZeroTier 的机器都能连。
+
+对应官网的 [Physical Network Routing (NAT/Masquerade)](https://docs.zerotier.com/route-between-phys-and-virt/)，
+官方手动要四步（加托管路由 / 开 IP 转发 / 三条 iptables 规则 / 做持久化），这里点一下全部自动完成。
+
+### 用法
+
+1. 侧栏 **子网路由**。
+2. **勾选一张或多张物理网卡**（界面已列出本机每张网卡及其网段，例如 `以太网 · 192.168.150.10/24`）。
+3. **共享网段**按所勾网卡自动生成：每张网卡的网段**放宽一位**（`192.168.150.10/24` → `192.168.150.0/23`），
+   **相同网段只生成一条**。这是官方建议：让**同时**能走本地网线的设备继续走本地，不绕 ZeroTier。
+4. 选 **ZeroTier 网络**（需已授权，界面会显示该网络里本机的 `zt*` 地址）。
+5. 填 **ZeroTier Central API Token** —— *仅当网络由 ZeroTier 官方控制器托管时需要*。
+6. 点 **开启转发**。
+
+### 关于 API Token
+
+| 网络由谁托管 | 是否需要 Token |
+|---|---|
+| 本机自建控制器（`zerotier-one -p19993` 自己控制的网络） | **不需要**，应用直接调本地 `/controller/network/<nwid>` |
+| ZeroTier 官方控制器（[my.zerotier.com](https://my.zerotier.com) 上建的网） | **需要**，用来往网络里写托管路由 |
+
+- Token 在 my.zerotier.com → **Account → API Access Tokens** 创建。
+- 令牌**只保存在 NAS 上**（`$TRIM_PKGVAR/central_token`，权限 `600`），列表类接口**不回显内容**；
+  界面上只显示「已保存 / 未保存」。需要核对时可点输入框旁的「显示」——这是你**主动**请求，
+  后端才会通过 `GET /api/subnet/token` 下发一次完整内容。旧版 `api.zerotier.com/api/v1`（`token` 头）与新版
+  `central.zerotier.com/api/v2`（`Bearer` 头）**两种都支持**，自动探测。
+
+### 应用会做的三件事
+
+1. **托管路由**：为每个**不同的物理网段**加一条 `Destination = 共享网段`、`Via = 本机 zt* 地址`
+   的托管路由（会先读出已有路由**合并**后再写回，不会冲掉你手动加的路由）。
+2. **IP 转发**：`net.ipv4.ip_forward=1`。
+3. **策略路由修正**：fnOS 多网卡会配置源地址策略路由（`ip rule from <网卡IP> lookup route_<网卡>`，
+   这些表只有默认路由）。NAS 用自己的局域网 IP 回包给隧道客户端时会被劫持到物理网关而丢弃。
+   应用会把**所有经由 zt 网卡的目的网段**钉到主路由表（`ip rule add to <网段> lookup main pref 5`），
+   关闭转发时移除。
+4. **NAT 规则**：**对每张勾选的网卡分别**下发 `iptables -t nat -A POSTROUTING ! -s <该网卡本网段> -o <物理网卡> -j MASQUERADE`
+   与对应的 `FORWARD` 放行规则。`! -s` 排除本网段——NAS 自己进出局域网的流量**绝不做源地址改写**，
+   否则多网卡同网段时回包源地址被改掉，会导致**用 NAS 自己的 IP 访问不通**。全部用 `iptables -C` 先判断
+   再插入，**幂等**，重复开启不会堆规则。
+
+每次应用启动（含 NAS 重启后）都会按保存的配置**重新应用一次**本机规则，
+因此**不需要**写 `/etc/sysctl.d` 或 `iptables-save`，不给系统留持久化痕迹。
+
+### 多网卡（含两张网卡同网段）
+
+- 界面会列出本机**所有**可共享的物理网卡（自动排除 `lo`、ZeroTier 网卡 `zt*`、
+  Docker 网桥 `docker0`/`br-*` 等虚拟接口），可**同时勾选多张**。
+- **每张网卡**各自下发一组 MASQUERADE + FORWARD 规则；任一网卡规则下发失败即整体中止并
+  回滚，不会出现「只配上一半」的状态。
+- **两张网卡接在同一个局域网**（例如双网口都在 `192.168.250.0/24`）也完全支持：
+  两个接口都会做 NAT/转发，但同网段的**托管路由只登记一条**，设备从任一网口进来都能通。
+- 状态页按网卡逐行显示 `nat_rule` / `forward_rules` 是否就位，最下面一行是汇总结果。
+- 旧版本保存的 `PHY_IFACE`/`TARGET`（单网卡）配置会在读取时**自动迁移**为列表形式，无需手动改。
+
+### 关闭与卸载
+
+点 **关闭转发** 会按「先撤网络上的托管路由、再删本机规则」的顺序清理
+（反过来会在这个网段上留下指向本机的路由，把整个网段对其他设备**黑洞化**）。
+
+**卸载应用时也会自动清理**（`uninstall_init` 调 `server.js --subnet-withdraw` 撤离线托管路由，
+再由 `cmd/main subnet-cleanup` 删本机规则）——这一步必须在停服务之前做，因为要跟守护进程通话。
+
+卸载向导提供两个选项：
+- **保留数据**（默认）：只清理路由与规则，节点身份和已加入的网络完整保留，重新安装后自动恢复。
+- **删除所有数据**：节点身份、API Token、子网路由配置一并清除，确保无残留。
+
+### 已知限制（官方同样如此）
+
+- 不转发广播/多播，所以**跨网段发现类**功能（mDNS、网上邻居自动发现）无效，需用 IP 直连。
+- 局域网侧设备**无法主动**发起连接到外部 ZeroTier 客户端，只能被动接受访问。
+- 需要目标网络里的成员设备把该网段的路由交给本机，即托管路由必须写成功；若写入后回读校验不通过，
+  界面会**明确报错**而不会假装成功。
+- 子网路由按 **IPv4** 工作：网络必须给本机分配 IPv4 地址。双栈网络即使本机先拿到 IPv6，
+  应用也会**自动挑选 IPv4** 作为托管路由的经由地址（`via` 填 IPv6 的 IPv4 路由不会生效）。
+
+## 数据与持久化
+
+| 内容 | 位置 |
+|---|---|
+| 节点身份（`identity.secret`）、`authtoken.secret`、已加入网络 | `$TRIM_PKGVAR/zt`（= `/vol{n}/@appdata/ztmesh/zt`，重启保留） |
+| Central API Token | `$TRIM_PKGVAR/central_token`（权限 `600`） |
+| 子网路由配置 | `$TRIM_PKGVAR/subnet.conf`（权限 `600`，含网卡名/网段；**存在即代表转发处于开启状态**） |
+| 子网路由日志 | `$TRIM_PKGVAR/subnet.log` |
+| 运行 pid / 端口文件 | `$TRIM_PKGTMP` |
+| 程序与 Web 界面 | `$TRIM_APPDEST`（= `/vol{n}/@appcenter/ztmesh`） |
+
+`authtoken.secret` 只保存在后端，Web 界面通过后端代理访问 ZeroTier API，**令牌不会下发到浏览器**。
+
+**卸载默认保留节点身份和网络数据**，重新安装即恢复原身份；在卸载向导中选择「删除所有数据」才会彻底清除。
+
+## 技术要点
+
+- **后端**：纯 Node.js 内置模块（`http`/`fs`/`path`/`child_process`），**零 npm 依赖**。
+  静态托管 `app/www`，把 `/api/*` 反向代理到 `127.0.0.1:<zerotier api port>` 并注入 `X-ZT1-Auth`。
+  网络选项开关也直接打本地 API，并在写入后**回读校验**，避免「返回成功但其实没生效」。
+  仅服务启停通过 `cmd/main` 调守护进程。
+- **权限**：`run-as: root`。ZeroTier 必须创建 TUN 网卡并改路由表，属于官方文档所说「没有更窄方案」的特权场景。
+  启动时显式传 `-U`（`Skip privilege check and do not attempt to drop privileges`）以保持 root。
+- **入口**：默认用端口入口（`protocol=http`，`port=13443`）。后端同时兼容飞牛**统一网关**：
+  会识别 `/app/ztmesh` 前缀并尝试监听 `$TRIM_APPDEST/app.sock`，前端也按当前路径自动推导 API 前缀。
+- **子网路由**：Node 侧只做它必须做的部分（写/删网络上的托管路由、枚举本机网卡、保存配置），
+  本机防火墙与内核参数交给 `cmd/main` 的 `subnet-up` / `subnet-down` / `subnet-cleanup` 执行。
+  写入顺序固定为 **写配置 → 配 NAT → 登记托管路由**，任一步失败都回滚；
+  所有写入都**回读校验**（托管路由写完后重新 GET 确认，`iptables` 用 `-C` 复核）。
+- **路径发现**：fnOS 传进来的 `TRIM_APPDEST` 是**解析后**的载荷目录（如 `/vol1/@appcenter/ztmesh`），
+  它的父目录**不是**应用根目录 —— 生命周期脚本在 `/var/apps/<appname>/cmd/` 下，是完全另一棵树。
+  因此所有脚本与后端都用 `find_main()` 按候选顺序探测，**绝不**从 `dirname($APPDEST)` 推导：
+  那样会得到 `/vol1/@appcenter/cmd/main`，每次调用都以 `exit 127` 失败（已由 `test_paths.js` 回归覆盖）。
+- **生命周期**：9 个脚本全部实现（`main` + install/upgrade/uninstall/config 的 init 与 callback），尽量幂等；
+  `status` 运行返回 0、未运行返回 3。
+
+## 重新构建
+
+```powershell
+python pack.py          # 调 fnpack 打包，然后修复权限位与校验和
+node verify_fpk.js      # 校验包结构、权限、ELF、JSON、checksum
+node test_paths.js      # cmd/main 路径发现回归测试（28 项，需提权：要跑 dash）
+node test_server.js     # 后端接口冒烟测试（16 项）
+node test_subnet.js     # 子网路由测试：Central 客户端契约 + 多网卡端点 + 卸载清理（88 项）
+node test_option.js     # 网络选项开关测试（14 项）
+node check_ui.js        # 前端契约静态校验：id / 视图 / CSS 类交叉比对
+```
+
+Shell 脚本改动后建议过一遍语法检查（本机无 bash，用 MinGit 里的 dash）：
+
+```powershell
+$sh = ".\tools\mingit\usr\bin\dash.exe"
+Get-ChildItem .\fpk\cmd -File | ForEach-Object { & $sh -n $_.FullName; "$LASTEXITCODE $($_.Name)" }
+```
+
+> 注意：本机脚本必须保持 **LF** 行尾。CRLF 会让 fnOS 上每个脚本报 `\r: command not found`。
+> `dash.exe` 是 Cygwin 程序，在受限沙箱里会因无法创建命名管道而失败，需要提权运行。
+
+**为什么要 `pack.py` 而不是直接用 fnpack**：Windows 版 `fnpack.exe` 无法写入 UNIX 权限位，它打出的包里
+所有文件都是 `0666` —— 包括 `cmd/*` 和 `app/zt/zerotier-one`，守护进程在 fnOS 上根本起不来。
+`pack.py` 在 fnpack 之后重写外层 tar 与内嵌 `app.tgz` 两层权限（脚本与二进制 `0755`，其余 `0644`）。
+
+另外，`manifest` 里的 `checksum` 经实测就是 **`md5(app.tgz)`**；由于重写 `app.tgz` 会改变其字节，
+`pack.py` 会重算该字段，并在打包后回读校验（`checksum verified: manifest == md5(app.tgz)`）。

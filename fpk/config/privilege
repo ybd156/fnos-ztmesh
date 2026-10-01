@@ -1,0 +1,7 @@
+{
+  "defaults": {
+    "run-as": "root"
+  },
+  "username": "ztmesh_user",
+  "groupname": "ztmesh_group"
+}

@@ -1,0 +1,44 @@
+#!/bin/bash
+# upgrade_init — invoked by fnOS BEFORE an upgrade is applied.
+# Stops the running service so the binary can be replaced safely.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+# --- locate cmd/main ------------------------------------------------------
+# fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
+# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
+# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+find_main(){
+  local c
+  for c in "/var/apps/$APPNAME/cmd/main" \
+           "${TRIM_PKGMETA:+$(dirname "$TRIM_PKGMETA")/cmd/main}" \
+           "$(dirname "$APPDEST")/cmd/main" \
+           "$APPDEST/cmd/main"; do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MAIN="$(find_main)" || MAIN=""
+APPROOT="${MAIN%/cmd/main}"
+[ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-upgrade.log}"
+log(){ echo "[${APPNAME}/upgrade_init] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== upgrade_init start ==="
+
+if [ -x "$MAIN" ]; then
+  "$MAIN" stop >>"$LOG" 2>&1
+  log "service stopped (rc=$?)"
+else
+  # Fall back to a direct kill if the lifecycle script is not reachable.
+  # Match the full installed path -- a bare "zerotier-one" pattern would also
+  # kill the independently published ZeroTier app running alongside this one.
+  log "WARNING: $MAIN not executable, falling back to pkill"
+  pkill -f "$APPDEST/zt/zerotier-one" >>"$LOG" 2>&1 || true
+  pkill -f "$APPDEST/server/server.js" >>"$LOG" 2>&1 || true
+fi
+
+log "=== upgrade_init ok ==="
+exit 0

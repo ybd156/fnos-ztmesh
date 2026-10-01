@@ -1,0 +1,212 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel2: #1c2230;
+  --border: #2a3242;
+  --text: #e6e9ef;
+  --muted: #8a93a6;
+  --accent: #3b82f6;
+  --accent2: #2563eb;
+  --green: #22c55e;
+  --red: #ef4444;
+  --amber: #f59e0b;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.app { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 240px; flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 20px 14px;
+}
+.brand { display: flex; align-items: center; gap: 12px; padding: 0 6px 18px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.brand-logo { width: 42px; height: 42px; border-radius: 10px; }
+.brand-text h1 { font-size: 18px; font-weight: 700; }
+.brand-sub { color: var(--muted); font-size: 12px; }
+
+.nav { display: flex; flex-direction: column; gap: 4px; }
+.nav-item {
+  background: transparent; border: none; color: var(--muted);
+  text-align: left; padding: 10px 12px; border-radius: 8px;
+  font-size: 14px; cursor: pointer; transition: background .15s, color .15s;
+}
+.nav-item:hover { background: var(--panel2); color: var(--text); }
+.nav-item.active { background: var(--accent2); color: #fff; font-weight: 600; }
+
+.service-state {
+  margin-top: auto; padding: 12px; background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.ss-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--amber); }
+.dot.online { background: var(--green); }
+.dot.offline { background: var(--red); }
+.sidebar-foot { margin-top: 12px; text-align: center; color: var(--muted); font-size: 11px; }
+
+.main { flex: 1; padding: 28px 32px; overflow-y: auto; }
+.view h2 { font-size: 20px; margin-bottom: 16px; }
+.view.hidden { display: none; }
+/* Generic utility. Placeholders such as .empty and the .toast are shown/hidden
+ * purely by adding this class, so it must win over whatever display value any
+ * other rule sets. */
+.hidden { display: none !important; }
+
+.card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
+}
+.card-label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.card-value { font-size: 20px; font-weight: 600; margin-bottom: 8px; }
+.card h3 { font-size: 15px; margin-bottom: 10px; }
+.mono { font-family: var(--mono); }
+.hint { color: var(--muted); margin-bottom: 12px; }
+
+.section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.section-head h2 { margin-bottom: 0; }
+
+.join-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.join-row.panel { margin-bottom: 16px; }
+.input {
+  flex: 1; min-width: 220px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+  font-family: var(--mono); font-size: 14px; outline: none;
+}
+.input:focus { border-color: var(--accent); }
+
+.btn {
+  padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel2); color: var(--text); cursor: pointer; font-size: 14px;
+  transition: background .15s, transform .05s;
+}
+.btn:hover { background: var(--border); }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent2); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: rgba(239,68,68,.12); }
+
+.list { display: flex; flex-direction: column; gap: 12px; }
+.net-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.net-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.net-name { font-size: 16px; font-weight: 600; }
+.net-id { font-family: var(--mono); color: var(--muted); font-size: 13px; margin-top: 2px; }
+.net-status { font-size: 12px; padding: 3px 10px; border-radius: 20px; white-space: nowrap; }
+.net-status.ok { background: rgba(34,197,94,.15); color: var(--green); }
+.net-status.pending { background: rgba(245,158,11,.15); color: var(--amber); }
+.net-status.denied { background: rgba(239,68,68,.15); color: var(--red); }
+.net-status.offline { background: rgba(138,147,166,.15); color: var(--muted); }
+.net-meta { color: var(--muted); font-size: 13px; }
+.ip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.ip-tag { font-family: var(--mono); background: var(--panel2); border: 1px solid var(--border); padding: 3px 8px; border-radius: 6px; font-size: 12px; color: var(--text); }
+.net-actions { display: flex; gap: 8px; margin-top: 4px; }
+/* 高级设置折叠模块：箭头旋转指示状态，内容区高度+透明度过渡 */
+.net-more { margin-top: 10px; display: inline-flex; align-items: center; gap: 6px; }
+.net-more .caret { display: inline-block; transition: transform .25s ease; font-size: 11px; }
+.net-more.open .caret { transform: rotate(180deg); }
+.net-extra {
+  overflow: hidden; max-height: 0; opacity: 0;
+  transition: max-height .3s ease, opacity .25s ease;
+}
+.net-extra.open { max-height: 640px; opacity: 1; }
+.net-opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+.net-opts .opt { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); cursor: pointer; user-select: none; }
+.net-opts .opt:hover { border-color: var(--accent); }
+.net-opts .opt input { width: 14px; height: 14px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; flex: none; }
+.opt-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.opt-label { font-size: 12.5px; color: var(--text); }
+.opt-desc { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+.net-danger { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.btn-armed { background: var(--red, #e5484d); color: #fff; border-color: transparent; }
+
+.peer-row {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 18px; display: flex; align-items: center; gap: 14px;
+}
+.peer-addr { font-family: var(--mono); font-weight: 600; width: 110px; flex: none; }
+.peer-info { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; }
+.peer-path { flex: 1.4; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.peer-path-list { max-height: 88px; overflow: auto; white-space: nowrap; scrollbar-width: thin; padding-right: 4px; }
+.peer-path-list div { line-height: 1.7; }
+
+.empty { color: var(--muted); text-align: center; padding: 30px; border: 1px dashed var(--border); border-radius: 12px; }
+
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+  padding: 12px 20px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+  z-index: 99;
+}
+.toast.error { border-color: var(--red); }
+.toast.ok { border-color: var(--green); }
+.toast.hidden { display: none; }
+
+/* ---------- subnet routing ---------- */
+select.input { width: 100%; cursor: pointer; }
+.field-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+.field-label { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.subnet-status { color: var(--muted); font-size: 13.5px; }
+.subnet-row {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+}
+.subnet-row:last-child { border-bottom: none; }
+.subnet-row-label { color: var(--muted); }
+.subnet-row-value { font-family: var(--mono); text-align: right; word-break: break-all; }
+.subnet-row-value.good { color: var(--green); }
+.subnet-row-value.bad { color: var(--red); }
+.subnet-log {
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+  max-height: 260px; overflow: auto;
+}
+.subnet-log.bad { color: var(--red); }
+
+/* multi-select of physical interfaces */
+.iface-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.iface-check {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer; font-size: 14px;
+}
+.iface-check:hover { border-color: var(--blue, #3b82f6); }
+.iface-check input { margin: 0; cursor: pointer; }
+.iface-check:has(input:disabled) { opacity: 0.7; cursor: default; }
+.subnet-target-auto { display: block; padding: 6px 0; color: var(--blue, #2563eb); }
+
+/* traffic monitor on the overview page */
+.stat-list { display: flex; flex-direction: column; }
+.stat-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 8px 0; border-bottom: 1px solid var(--border);
+}
+.stat-row:last-child { border-bottom: none; }
+.stat-name { font-family: var(--mono); }
+.stat-meta { color: var(--muted); font-size: 13px; flex: 1; }
+.stat-traffic { display: flex; gap: 14px; font-family: var(--mono); font-size: 13px; }
+
+@media (max-width: 720px) {
+  .app { flex-direction: column; }
+  .sidebar { width: 100%; flex-direction: row; align-items: center; }
+  .nav { flex-direction: row; }
+  .service-state { margin-top: 0; margin-left: auto; }
+  .brand { border-bottom: none; margin-bottom: 0; }
+}

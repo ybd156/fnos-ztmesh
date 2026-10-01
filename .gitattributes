@@ -1,0 +1,10 @@
+* text=auto
+# fnOS 生命周期脚本必须保持 LF，CRLF 会导致 \r: command not found
+fpk/cmd/* text eol=lf
+fpk/config/* text eol=lf
+fpk/manifest text eol=lf
+fpk/wizard/* text eol=lf
+# 二进制不做行尾转换
+fpk/app/zt/zerotier-one binary
+*.png binary
+*.PNG binary

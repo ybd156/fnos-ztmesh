@@ -1,0 +1,15 @@
+appname=ztmesh
+version=1.1.0
+display_name=ZeroTier异地组网-虚拟局域网
+desc=ZeroTier异地组网-虚拟局域网（VLAN/VPN）：将飞牛NAS接入 ZeroTier 虚拟网络，实现异地设备安全互联、内网穿透、远程访问与组网。
+source=thirdparty
+platform=x86
+maintainer=移不动156
+distributor=移不动156
+os_min_version=1.0.0
+desktop_uidir=ui
+desktop_applaunchname=ztmesh.main
+ctl_stop=true
+checkport=true
+service_port=13443
+install_dep_apps=nodejs_v22

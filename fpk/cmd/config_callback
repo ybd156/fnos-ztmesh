@@ -1,0 +1,63 @@
+#!/bin/bash
+# config_callback — invoked by fnOS AFTER settings/wizard changes are applied.
+# Restarts the service so the new settings take effect.
+set -u
+
+APPNAME="${TRIM_APPNAME:-ztmesh}"
+APPDEST="${TRIM_APPDEST:-/var/apps/${APPNAME}/target}"
+# --- locate cmd/main ------------------------------------------------------
+# fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
+# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
+# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+find_main(){
+  local c
+  for c in "/var/apps/$APPNAME/cmd/main" \
+           "${TRIM_PKGMETA:+$(dirname "$TRIM_PKGMETA")/cmd/main}" \
+           "$(dirname "$APPDEST")/cmd/main" \
+           "$APPDEST/cmd/main"; do
+    [ -f "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+MAIN="$(find_main)" || MAIN=""
+APPROOT="${MAIN%/cmd/main}"
+[ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-config.log}"
+log(){ echo "[${APPNAME}/config_callback] $*" >> "$LOG" 2>/dev/null; }
+
+log "=== config_callback start ==="
+
+# If a network id was supplied by the wizard, queue it so that the freshly
+# started daemon joins it. The wizard answer is exported by fnOS under the
+# field name prefixed with "wizard_"; several spellings are probed because
+# the exact suffix case varies between fnOS releases.
+PENDING_NID="${wizard_network_id:-${wizard_networkId:-${wizard_network:-}}}"
+PENDING_FILE="${TRIM_PKGVAR:-/var/apps/${APPNAME}/var}/pending_network"
+
+if [ -n "$PENDING_NID" ]; then
+  case "$PENDING_NID" in
+    *[!0-9a-fA-F]*|"")
+      log "wizard network id '$PENDING_NID' is not 16 hex chars; ignored"
+      ;;
+    *)
+      if [ "${#PENDING_NID}" -eq 16 ]; then
+        mkdir -p "$(dirname "$PENDING_FILE")"
+        printf '%s\n' "$PENDING_NID" > "$PENDING_FILE"
+        log "queued network join for $PENDING_NID"
+      else
+        log "wizard network id '$PENDING_NID' has wrong length; ignored"
+      fi
+      ;;
+  esac
+fi
+
+if [ -x "$MAIN" ]; then
+  "$MAIN" restart >>"$LOG" 2>&1
+  log "service restart rc=$?"
+else
+  log "ERROR: $MAIN not executable; service not restarted"
+fi
+
+log "=== config_callback ok ==="
+exit 0
