@@ -11,8 +11,8 @@
 ## [1.2.0] - 2026-10-02
 
 ### 新增
-- 多架构支持：分架构出包，提供 `ztmesh-x86.fpk`（x86-64）与 `ztmesh-arm.fpk`（arm64/aarch64）两个安装包；安装前按 `uname -m` 校验架构并给出中文报错（次版本号提升：向后兼容的新平台支持）
-- `pack.py` 支持 `python pack.py [x86|arm]` 分架构打包，manifest 的 `platform` 字段随包写入
+- 多架构支持：分架构出包，提供 `ztmesh-x86_64.fpk`（x86-64）与 `ztmesh-arm.fpk`（arm64/aarch64）两个安装包；安装前按 `uname -m` 校验架构并给出中文报错（次版本号提升：向后兼容的新平台支持）
+- `pack.py` 支持 `python pack.py [x86_64|arm]` 分架构打包，manifest 的 `platform` 字段随包写入
 
 ### 变更
 - `verify_fpk.js` 按包名校验 ELF 架构（x86-64: e_machine=62 / arm64: e_machine=183）与 manifest platform 一致性

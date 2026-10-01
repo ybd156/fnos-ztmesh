@@ -4,7 +4,7 @@
 ## 安装
 
 1. 飞牛 → **应用中心 → 手动安装**，按你的 NAS 架构选择对应安装包：
-   - `ztmesh-x86.fpk`（x86-64 / Intel / AMD）
+   - `ztmesh-x86_64.fpk`（x86-64 / Intel / AMD）
    - `ztmesh-arm.fpk`（arm64 / aarch64）
 2. 安装向导中可填写要加入的 **16 位网络 ID**（可留空，之后在界面里加也行）。
 3. 安装完成后 ZeroTier 服务会自动启动。若填了网络 ID，会在首次启动时自动加入。

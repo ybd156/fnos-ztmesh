@@ -16,13 +16,13 @@ runs fnpack and then rewrites BOTH archives with correct modes:
   * app/zt/zerotier-one             -> 0755
   * everything else                 -> 0644
 
-Usage:  python pack.py [x86|arm]
+Usage:  python pack.py [x86_64|arm]
 
 With an argument, builds a platform-specific package:
-  x86  -> ztmesh-x86.fpk   (manifest platform=x86, binary from fpk/app/zt/)
-  arm  -> ztmesh-arm.fpk   (manifest platform=arm, binary from dl/zerotier-one.arm64)
+  x86_64  -> ztmesh-x86_64.fpk   (manifest platform=x86, binary from fpk/app/zt/)
+  arm     -> ztmesh-arm.fpk      (manifest platform=arm, binary from dl/zerotier-one.arm64)
 
-Without an argument, builds the default x86 package for backward compatibility.
+Without an argument, builds the default x86_64 package for backward compatibility.
 """
 import hashlib
 import io
@@ -56,11 +56,14 @@ EXEC_MODE = 0o755
 # platform helpers
 # ---------------------------------------------------------------------------
 
-PLATFORM = sys.argv[1] if len(sys.argv) > 1 else 'x86'
-if PLATFORM not in ('x86', 'arm'):
-    sys.exit('usage: python pack.py [x86|arm]')
+PLATFORM = sys.argv[1] if len(sys.argv) > 1 else 'x86_64'
+if PLATFORM not in ('x86_64', 'arm'):
+    sys.exit('usage: python pack.py [x86_64|arm]')
 
 FPK = os.path.join(HERE, f'ztmesh-{PLATFORM}.fpk')
+
+# fnOS manifest platform values: x86 or arm
+MANIFEST_PLATFORM = 'x86' if PLATFORM == 'x86_64' else PLATFORM
 
 MANIFEST = os.path.join(SRC, 'manifest')
 ZT_BIN_DIR = os.path.join(SRC, 'app', 'zt')
@@ -86,7 +89,7 @@ def set_manifest_platform(plat):
 
 def prepare_platform():
     """Ensure the binary in fpk/app/zt matches the requested platform."""
-    if PLATFORM == 'x86':
+    if PLATFORM == 'x86_64':
         # nothing to swap; the repo already contains the x86-64 build
         return
     if not os.path.exists(ARM_BIN):
@@ -98,18 +101,16 @@ def prepare_platform():
 
 
 def restore_platform():
-    """Restore the x86 binary after building the arm package."""
+    """Restore the x86-64 binary after building the arm package."""
     if PLATFORM == 'arm':
         # The repo must always ship the x86-64 build so that a bare
-        # `python pack.py` continues to produce the x86 package.
-        # We cannot restore from git because the file may be modified;
-        # instead we keep a copy before overwriting.
+        # `python pack.py` continues to produce the x86_64 package.
         pass
 
 
 def main():
-    # For arm builds, save the x86 binary outside the package tree so it does
-    # not get packed into the arm fpk.
+    # For arm builds, save the x86-64 binary outside the package tree so it
+    # does not get packed into the arm fpk.
     x86_backup = None
     if PLATFORM == 'arm':
         x86_backup = os.path.join(DL, 'zerotier-one.x86-backup')
@@ -117,7 +118,7 @@ def main():
 
     try:
         prepare_platform()
-        set_manifest_platform(PLATFORM)
+        set_manifest_platform(MANIFEST_PLATFORM)
 
         run_fnpack()
         before = os.path.getsize(FPK)

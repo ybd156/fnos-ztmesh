@@ -5,11 +5,11 @@ const zlib = require('zlib');
 const tar = require('child_process');
 const crypto = require('crypto');
 
-const FP = path.join(__dirname, process.argv[2] || 'ztmesh-x86.fpk');
+const FP = path.join(__dirname, process.argv[2] || 'ztmesh-x86_64.fpk');
 const raw = zlib.gunzipSync(fs.readFileSync(FP));
 
 // Detect expected platform from filename (e.g. ztmesh-arm.fpk -> arm)
-const PLAT = (FP.match(/ztmesh-(\w+)\.fpk$/) || [])[1] || 'x86';
+const PLAT = (FP.match(/ztmesh-(\w+)\.fpk$/) || [])[1] || 'x86_64';
 const EXPECTED_MACHINE = PLAT === 'arm' ? 183 : 62;   // 183=aarch64, 62=x86-64
 
 function parseTar(buf) {
@@ -90,7 +90,8 @@ if (mf) {
   for (const k of ['appname', 'version', 'platform', 'source', 'desktop_uidir', 'desktop_applaunchname', 'service_port'])
     ok(new RegExp('^' + k + '\\s*=', 'm').test(t), `manifest declares ${k}`);
   const platMatch = t.match(/^platform\s*=\s*(\S+)/m);
-  ok(platMatch && platMatch[1] === PLAT, `manifest platform matches package (${platMatch && platMatch[1]}, expected ${PLAT})`);
+  const expectedManifestPlat = PLAT === 'x86_64' ? 'x86' : PLAT;
+  ok(platMatch && platMatch[1] === expectedManifestPlat, `manifest platform matches package (${platMatch && platMatch[1]}, expected ${expectedManifestPlat})`);
 
   // fnpack records md5(app.tgz) as the package checksum; our mode repair
   // rewrites app.tgz, so the declared digest must be the repaired one.
