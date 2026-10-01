@@ -1,9 +1,25 @@
+# 构建与工具（不发布）
 /tools/
 /dl/
 /ztmesh.fpk
 /_fntmp/
+/_raw/
+
+# 测试运行产物
 /test-var/
 /test-tmp/
 *.pyc
 __pycache__/
 *.log
+
+# 环境与凭据（防误提交）
+.env
+.env.*
+*.pem
+*.key
+*.secret
+*.token
+*_token
+id_rsa*
+*.pfx
+*.p12
