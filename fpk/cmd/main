@@ -1,6 +1,13 @@
 #!/bin/bash
 # ZeroTier fnOS lifecycle script
-# Commands: start | stop | status | restart
+# Commands: start | stop | restart | status | zt-start | zt-stop
+#           set-option | subnet-up | subnet-down | subnet-cleanup | subnet-status
+#           subnet-off-local | supervise | autostart-enable | autostart-disable | autostart-status
+#
+# The management backend is a single Go binary (bin/ztmesh-server); the package
+# no longer needs the nodejs runtime. Everything that needs root lives here:
+# the ZeroTier daemon, iptables, the watchdog and autostart registration.
+set -u
 
 # --- resolve standard fnOS paths -----------------------------------------
 APPNAME="${TRIM_APPNAME:-ztmesh}"
@@ -10,88 +17,110 @@ PKGTMP="${TRIM_PKGTMP:-/var/apps/${APPNAME}/tmp}"
 ETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
 
 # --- resolved sub-paths ---------------------------------------------------
-ZT_DIR="${PKGVAR}/zt"                 # persistent zerotier working directory (identity lives here)
-ZT_BIN="${APPDEST}/zt/zerotier-one"   # zerotier daemon binary
-# ZeroTier local API + UDP listen port. It is deliberately NOT 9993: this
-# package is designed to coexist with the independently published "ZeroTier" app,
-# whose daemon binds 9993; two daemons on the same host need distinct ports.
+ZT_DIR="${PKGVAR}/zt"                    # persistent zerotier working dir (identity lives here)
+ZT_BIN="${APPDEST}/zt/zerotier-one"      # zerotier daemon binary
+WEB_BIN="${APPDEST}/bin/ztmesh-server"   # management backend (Go, static)
+WEB_ROOT="${APPDEST}/www"
+# ZeroTier local API + UDP listen port. Deliberately NOT 9993: this package is
+# designed to coexist with the independently published "ZeroTier" app, whose
+# daemon binds 9993; two daemons on one host need distinct ports.
 ZT_API_PORT=19993
-WEB_APP_DIR="${APPDEST}/www"
-WEB_SERVER="${APPDEST}/server/server.js"
-NODE="node"
+# Must match manifest service_port and app/ui/config; TRIM_SERVICE_PORT wins
+# when fnOS passes it. The old default of 3443 did not match either.
+WEB_PORT="${TRIM_SERVICE_PORT:-13443}"
+
+ZT_PIDFILE="${PKGTMP}/zerotier-one.pid"
+WEB_PIDFILE="${PKGTMP}/web.pid"
+WATCHDOG_PIDFILE="${PKGTMP}/watchdog.pid"
+STOP_FLAG="${PKGTMP}/watchdog.stop"
+ZT_DISABLED_FLAG="${PKGVAR}/zt_disabled"      # set by the UI's "stop service"
+ZT_PORTFILE="${ZT_DIR}/zerotier-one.port"
+
+SUBNET_CONF="${PKGVAR}/subnet.conf"
+SUBNET_LOG="${PKGVAR}/subnet.log"
+AUTOSTART_CONF="${PKGVAR}/autostart.conf"
+SYSTEMD_UNIT="/etc/systemd/system/${APPNAME}.service"
+CRON_FILE="/etc/cron.d/${APPNAME}"
+APPROOT="${APPDEST%/target}"
+
+MAIN_LOG="${TRIM_TEMP_LOGFILE:-/tmp/${APPNAME}-main.log}"
+
+# The watchdog re-invokes this script, so it needs a stable absolute path even
+# when the caller used a relative one. /var/apps/<appname> is the documented
+# stable entry, so it is the right fallback.
+SELF="$0"
+case "$SELF" in
+  /*) : ;;
+  *) SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")" ;;
+esac
+[ -f "$SELF" ] || SELF="/var/apps/${APPNAME}/cmd/main"
+# Derive the app root from this script's own location: fnOS may pass TRIM_APPDEST
+# as the resolved payload directory (/vol1/@appcenter/ztmesh), where stripping a
+# "/target" suffix yields nothing useful. The systemd unit and the cron entry
+# must point at a path that really exists.
+if [ -d "$(dirname "$(dirname "$SELF")")/cmd" ]; then
+  APPROOT="$(dirname "$(dirname "$SELF")")"
+fi
+
+# log() must exist before anything can fail, and the log directory must exist
+# before log() writes: the old script called log() from the architecture guard
+# several lines above its own definition, which printed "command not found".
+mkdir -p "$PKGTMP" "$PKGVAR" "$ZT_DIR" 2>/dev/null
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$APPNAME] $*" >> "$MAIN_LOG" 2>/dev/null; }
 
 # --- architecture: pick the correct bundled zerotier-one --------------------
 # The fpk contains the matching binary for the platform declared in the
-# manifest.  We still check uname -m here in case someone manually extracts
-# the package on the wrong architecture.
+# manifest. We still check uname -m here in case someone extracts the package
+# on the wrong architecture.
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64|amd64)
-    ZT_BIN="${APPDEST}/zt/zerotier-one"  # x86-64 ELF
-    ;;
-  aarch64|arm64)
-    ZT_BIN="${APPDEST}/zt/zerotier-one"  # arm64 ELF (built from zerotier-one_1.16.2_arm64.deb)
-    ;;
+  x86_64|amd64|aarch64|arm64) : ;;
   *)
     log "ERROR: unsupported architecture '$ARCH'"
+    echo "当前设备架构 $ARCH 不受支持（仅 x86-64 / arm64）。" >&2
     exit 1
     ;;
 esac
 
-ZT_PIDFILE="${PKGTMP}/zerotier-one.pid"
-WEB_PIDFILE="${PKGTMP}/web.pid"
-ZT_PORTFILE="${ZT_DIR}/zerotier-one.port"
-
-MAIN_LOG="${TRIM_TEMP_LOGFILE:-/tmp/ztmesh-main.log}"
-log(){ echo "[ztmesh] $*" >> "$MAIN_LOG"; }
-
-# is_pid_alive <pid> -> 0 alive, 1 dead
+# is_pid_alive <pid> [expected-exe] -> 0 alive, 1 dead
+# A PID file alone is not proof: PIDs are reused after a reboot, so when an
+# expected executable is given the process must also be that executable.
 is_pid_alive(){
-  local p="$1"
-  [ -n "$p" ] && [ -d "/proc/$p" ] && return 0
-  return 1
+  local p="$1" want="${2:-}"
+  [ -n "$p" ] || return 1
+  [ -d "/proc/$p" ] || return 1
+  if [ -n "$want" ]; then
+    local exe
+    exe=$(readlink "/proc/$p/exe" 2>/dev/null) || return 1
+    case "$exe" in
+      "$want"|"$want (deleted)") return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  return 0
 }
 
 zt_is_running(){
   local pid
   pid=$(cat "$ZT_PIDFILE" 2>/dev/null)
-  is_pid_alive "$pid" && return 0
+  is_pid_alive "$pid" "$ZT_BIN" && return 0
   return 1
 }
 
 web_is_running(){
   local pid
   pid=$(cat "$WEB_PIDFILE" 2>/dev/null)
-  is_pid_alive "$pid" && return 0
+  is_pid_alive "$pid" "$WEB_BIN" && return 0
   return 1
 }
 
-# --- runtime discovery ----------------------------------------------------
-
-# install_dep_apps=nodejs_v22 only guarantees that the dependency is installed;
-# per the fnOS docs the caller must put its target/bin on PATH, so resolve the
-# interpreter explicitly instead of assuming a bare `node` resolves.
-resolve_node(){
-  local cand
-  cand=$(command -v node 2>/dev/null)
-  if [ -n "$cand" ]; then
-    NODE="$cand"
-    return 0
-  fi
-  for cand in /var/apps/nodejs_v22/target/bin/node \
-              /var/apps/nodejs*/target/bin/node \
-              /vol*/@appcenter/nodejs*/target/bin/node \
-              /var/apps/nodejs*/bin/node; do
-    if [ -x "$cand" ]; then
-      NODE="$cand"
-      PATH="$(dirname "$cand"):$PATH"
-      export PATH
-      log "resolved node: $cand"
-      return 0
-    fi
-  done
-  log "node runtime not found"
-  return 1
+# Ask the backend whether it is actually serving. The Go binary has a --health
+# mode, so this needs no curl/wget on the appliance.
+web_healthy(){
+  [ -x "$WEB_BIN" ] || return 1
+  TRIM_APPNAME="$APPNAME" TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$PKGVAR" \
+  TRIM_PKGTMP="$PKGTMP" TRIM_PKGETC="$ETC" TRIM_SERVICE_PORT="$WEB_PORT" \
+    "$WEB_BIN" --health >/dev/null 2>&1
 }
 
 # PID of the running zerotier-one, without depending on pgrep being installed.
@@ -114,23 +143,21 @@ find_zt_pid(){
   return 1
 }
 
+# --- zerotier daemon -------------------------------------------------------
+
 start_zerotier(){
-  # ensure persistent working directory
   mkdir -p "$ZT_DIR" "$PKGTMP"
-  chmod 700 "$ZT_DIR"
+  chmod 700 "$ZT_DIR" 2>/dev/null
   if zt_is_running; then
     log "zerotier-one already running"
     return 0
   fi
-  # remove stale pid/socket
   rm -f "$ZT_PIDFILE" "$ZT_PORTFILE" "$PKGTMP/zerotier-one.sock"
-  # Launch the daemon. It must stay root: it creates the TUN interface and
-  # edits the routing table. ZeroTier voluntarily drops privileges when its
-  # home directory is not owned by root, which would break interface creation
-  # (and there is a FATAL path when the drop fails), so -U is passed to keep
-  # root explicitly. The home directory is the trailing positional argument.
+  # The daemon must stay root: it creates the TUN interface and edits the
+  # routing table. ZeroTier voluntarily drops privileges when its home
+  # directory is not owned by root, which would break interface creation, so
+  # -U is passed to keep root explicitly.
   "$ZT_BIN" -d -U -p"$ZT_API_PORT" "$ZT_DIR"
-  # wait for API socket/token to appear
   local i=0
   while [ $i -lt 30 ]; do
     if [ -f "$ZT_DIR/authtoken.secret" ] && [ -f "$ZT_PORTFILE" ]; then
@@ -139,7 +166,6 @@ start_zerotier(){
     sleep 1
     i=$((i+1))
   done
-  # record pid
   local pid
   pid=$(find_zt_pid)
   if [ -n "$pid" ]; then
@@ -149,12 +175,11 @@ start_zerotier(){
     return 0
   fi
   log "failed to start zerotier-one"
+  echo "ZeroTier 守护进程启动失败，请查看日志：$MAIN_LOG" >&2
   return 1
 }
 
 # Join the network queued by the install/config wizard, then clear the queue.
-# The wizard answer arrives as the env var $wizard_network_id; the lifecycle
-# scripts store it in $PKGVAR/pending_network for the daemon to pick up.
 join_pending_network(){
   local f="${PKGVAR}/pending_network"
   [ -f "$f" ] || return 0
@@ -189,31 +214,6 @@ join_pending_network(){
   return 0
 }
 
-start_web(){
-  if web_is_running; then
-    log "web server already running"
-    return 0
-  fi
-  if ! resolve_node; then
-    log "cannot start web UI: no node runtime found"
-    return 1
-  fi
-  rm -f "$WEB_PIDFILE"
-  # launch node backend serving static UI + proxying to zerotier API.
-  # The resolved paths are exported so server.js never has to re-derive them.
-  TRIM_APPNAME="$APPNAME" \
-  TRIM_APPDEST="$APPDEST" \
-  TRIM_PKGVAR="$PKGVAR" \
-  TRIM_PKGTMP="$PKGTMP" \
-  TRIM_PKGETC="$ETC" \
-  TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT:-3443}" \
-  nohup "$NODE" "$WEB_SERVER" >>"$MAIN_LOG" 2>&1 &
-  local pid=$!
-  echo "$pid" > "$WEB_PIDFILE"
-  log "web server started (pid $pid, node $NODE)"
-  return 0
-}
-
 stop_zerotier(){
   if ! zt_is_running; then
     rm -f "$ZT_PIDFILE"
@@ -221,14 +221,46 @@ stop_zerotier(){
   fi
   local pid
   pid=$(cat "$ZT_PIDFILE" 2>/dev/null)
-  if is_pid_alive "$pid"; then
+  if is_pid_alive "$pid" "$ZT_BIN"; then
     kill "$pid" 2>/dev/null
     local i=0
-    while is_pid_alive "$pid" && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
-    is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null
+    while is_pid_alive "$pid" "$ZT_BIN" && [ $i -lt 15 ]; do sleep 1; i=$((i+1)); done
+    is_pid_alive "$pid" "$ZT_BIN" && kill -9 "$pid" 2>/dev/null
   fi
   rm -f "$ZT_PIDFILE" "$ZT_PORTFILE" "$PKGTMP/zerotier-one.sock"
   log "zerotier-one stopped"
+}
+
+# --- web backend -----------------------------------------------------------
+
+start_web(){
+  if web_is_running && web_healthy; then
+    log "web server already running"
+    return 0
+  fi
+  if [ ! -x "$WEB_BIN" ]; then
+    log "ERROR: $WEB_BIN missing or not executable"
+    echo "管理界面程序缺失或不可执行：$WEB_BIN" >&2
+    return 1
+  fi
+  rm -f "$WEB_PIDFILE"
+  TRIM_APPNAME="$APPNAME" TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$PKGVAR" \
+  TRIM_PKGTMP="$PKGTMP" TRIM_PKGETC="$ETC" TRIM_SERVICE_PORT="$WEB_PORT" \
+    nohup "$WEB_BIN" >>"$MAIN_LOG" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$WEB_PIDFILE"
+  local i=0
+  while [ $i -lt 20 ]; do
+    if web_healthy; then
+      log "web server started (pid $pid, port $WEB_PORT)"
+      return 0
+    fi
+    sleep 1
+    i=$((i+1))
+  done
+  log "web server failed its health check on port $WEB_PORT (pid $pid)"
+  echo "管理界面启动失败（端口 $WEB_PORT），请查看日志：$MAIN_LOG" >&2
+  return 1
 }
 
 stop_web(){
@@ -238,40 +270,121 @@ stop_web(){
   fi
   local pid
   pid=$(cat "$WEB_PIDFILE" 2>/dev/null)
-  if is_pid_alive "$pid"; then
+  if is_pid_alive "$pid" "$WEB_BIN"; then
     kill "$pid" 2>/dev/null
     local i=0
-    while is_pid_alive "$pid" && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
-    is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null
+    while is_pid_alive "$pid" "$WEB_BIN" && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+    is_pid_alive "$pid" "$WEB_BIN" && kill -9 "$pid" 2>/dev/null
   fi
-  rm -f "$WEB_PIDFILE"
+  rm -f "$WEB_PIDFILE" "${APPDEST}/app.sock"
   log "web server stopped"
 }
 
+# --- watchdog --------------------------------------------------------------
+# Keeps the app usable without the user noticing a crash: the web backend and
+# the ZeroTier daemon are restarted when they die. It also re-applies the
+# subnet rules after a daemon restart, because a fresh tunnel device may need
+# them immediately.
+
+watchdog_is_running(){
+  local pid
+  pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null)
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] || return 1
+  local cmd
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  case "$cmd" in
+    *"cmd/main"*supervise*) return 0 ;;
+  esac
+  return 1
+}
+
+start_watchdog(){
+  if watchdog_is_running; then
+    log "watchdog already running"
+    return 0
+  fi
+  rm -f "$STOP_FLAG"
+  nohup "$SELF" supervise >>"$MAIN_LOG" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$WATCHDOG_PIDFILE"
+  log "watchdog started (pid $pid)"
+  return 0
+}
+
+stop_watchdog(){
+  : > "$STOP_FLAG"
+  local pid
+  pid=$(cat "$WATCHDOG_PIDFILE" 2>/dev/null)
+  if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+    kill "$pid" 2>/dev/null
+    local i=0
+    while [ -d "/proc/$pid" ] && [ $i -lt 5 ]; do sleep 1; i=$((i+1)); done
+    [ -d "/proc/$pid" ] && kill -9 "$pid" 2>/dev/null
+  fi
+  rm -f "$WATCHDOG_PIDFILE"
+  log "watchdog stopped"
+}
+
+supervise_loop(){
+  echo $$ > "$WATCHDOG_PIDFILE"
+  log "supervise loop up (pid $$)"
+  local interval=15
+  local tick=0
+  while :; do
+    [ -f "$STOP_FLAG" ] && break
+    if ! web_is_running || ! web_healthy; then
+      log "watchdog: web backend down, restarting"
+      stop_web
+      start_web || log "watchdog: web restart failed"
+    fi
+    if [ ! -f "$ZT_DISABLED_FLAG" ]; then
+      if ! zt_is_running; then
+        log "watchdog: zerotier-one down, restarting"
+        start_zerotier || log "watchdog: daemon restart failed"
+        apply_subnet_on_boot
+      fi
+    fi
+    # A managed route that could not be registered at boot (network not
+    # connected yet) is retried roughly every 75s instead of staying missing
+    # until the next restart.
+    tick=$((tick + 1))
+    if [ $((tick % 5)) -eq 0 ]; then
+      restore_managed_routes
+    fi
+    # At boot the tunnel device and the physical NICs may not be up yet when
+    # `start` runs: the NAT rules still get installed (iptables keeps interface
+    # names as strings), but the policy-routing fix cannot enumerate the tunnel
+    # destinations, and a NIC without an address yields no MASQUERADE rule. That
+    # is exactly the "多网卡开机后子网路由不生效" case, so keep re-checking until
+    # the recorded configuration is fully in place.
+    # Check often right after a start (boot convergence), then back off to
+    # roughly once a minute to keep the log and the process count quiet.
+    if [ -f "$SUBNET_CONF" ]; then
+      if [ "$tick" -le 8 ] || [ $((tick % 4)) -eq 0 ]; then
+        if ! subnet_rules_complete; then
+          log "watchdog: subnet rules incomplete, re-applying"
+          apply_subnet_on_boot
+        fi
+      fi
+    fi
+    sleep "$interval"
+  done
+  log "supervise loop exit (pid $$)"
+}
+
 # --- subnet routing -------------------------------------------------------
-# Lets ZeroTier members reach the physical LAN this NAS sits on (printers, the
-# NAS's own shares, the router, ...).  The other half of the job -- the managed
-# route that tells the network to send that subnet here -- is done over the
-# ZeroTier Central API by server.js, because route authority lives with the
-# network controller.
-#
-# This half has to be re-applied on every start: iptables rules do not survive
-# a reboot, and neither does net.ipv4.ip_forward if the appliance resets it.
-# The desired setup is remembered in $SUBNET_CONF, written by /api/subnet/enable.
-SUBNET_CONF="${PKGVAR}/subnet.conf"
-SUBNET_LOG="${PKGVAR}/subnet.log"
+# Lets ZeroTier members reach the physical LAN this NAS sits on. The other half
+# -- the managed route that tells the network to send that subnet here -- is
+# held by whoever controls the network and is written by the Go backend.
 
 # Read one KEY=value out of the config without sourcing it (the file is written
-# by the web layer, so it is parsed rather than executed).  Values containing a
-# list (PHY_IFACES) are stored quoted; strip one pair of surrounding quotes.
+# by the web layer, so it is parsed rather than executed).
 subnet_get(){
   sed -n "s/^$1=//p" "$SUBNET_CONF" 2>/dev/null | head -n1 | sed 's/^"//;s/"$//'
 }
 
 # Defence in depth: the web layer validates names strictly before they reach us;
-# here we reject the arguments that would still hurt if they slipped through --
-# a leading dash would be parsed as an iptables option, a slash is not a legal
-# interface name, and whitespace would change how the list is re-split.
+# here we reject the arguments that would still hurt if they slipped through.
 valid_iface_name(){
   local n="${1:-}"
   [ -n "$n" ] && [ ${#n} -le 32 ] || return 1
@@ -282,8 +395,8 @@ valid_iface_name(){
   return 0
 }
 
-# "Let the replies come back" rule.  The same conntrack match has a modern and
-# a legacy spelling; not every iptables build ships both, so try each in turn.
+# "Let the replies come back" rule. The same conntrack match has a modern and a
+# legacy spelling; not every iptables build ships both, so try each in turn.
 subnet_add_related(){
   local phy="$1" zt="$2"
   iptables -C FORWARD -i "$phy" -o "$zt" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null && return 0
@@ -300,7 +413,6 @@ subnet_del_related(){
   return 0
 }
 
-# Report the state of one physical interface on one machine-readable line.
 # Connected IPv4 subnet of an interface, e.g. "192.168.250.0/24" (empty if none).
 phy_subnet(){
   local s
@@ -312,11 +424,11 @@ phy_subnet(){
 # --- policy routing guard ---------------------------------------------------
 # fnOS multi-NIC boxes use source-based policy routing, e.g.
 #   ip rule: from 192.168.250.3 lookup route_ens18
-# and those per-NIC tables only hold a default route. A reply the NAS sends
-# FROM its LAN address TO a tunnel client would match those rules and be
-# thrown out of the physical NIC to the gateway, where the private ZT
-# destination dies. Pin every destination reachable via the tunnel interface
-# to the main table, ahead of the source-based rules (fnOS uses pref 10/11).
+# and those per-NIC tables only hold a default route. A reply the NAS sends FROM
+# its LAN address TO a tunnel client would match those rules and be thrown out
+# of the physical NIC to the gateway, where the private ZT destination dies.
+# Pin every destination reachable via the tunnel interface to the main table,
+# ahead of the source-based rules (fnOS uses pref 10/11).
 ZT_RULE_PREF=5
 
 subnet_fix_policy_rules(){
@@ -330,12 +442,21 @@ subnet_fix_policy_rules(){
   return 0
 }
 
+# Only remove rules that point at the subnets recorded in subnet.conf, never
+# every pref-5 rule on the box: another app may own some of them.
 subnet_unfix_policy_rules(){
   local line dst
+  local targets
+  targets="$(subnet_get TARGETS)"
+  [ -n "$targets" ] || targets="$(subnet_get TARGET)"
+  [ -n "$targets" ] || return 0
   ip rule show 2>/dev/null | grep "^$ZT_RULE_PREF:" | grep ' lookup main$' | \
   while read -r line; do
     dst=$(echo "$line" | sed -n 's/.* to \([^ ]*\) .*/\1/p')
-    [ -n "$dst" ] && ip rule del to "$dst" lookup main pref $ZT_RULE_PREF 2>/dev/null
+    [ -n "$dst" ] || continue
+    case " $targets " in
+      *" $dst "*) ip rule del to "$dst" lookup main pref $ZT_RULE_PREF 2>/dev/null ;;
+    esac
   done
   return 0
 }
@@ -362,11 +483,38 @@ subnet_report_phy(){
   echo "$line"
 }
 
+# Is the saved subnet configuration fully in place right now?
+#
+# Used by the watchdog: at boot the tunnel device may not exist yet, so the
+# policy-routing rules cannot be enumerated, and a physical NIC without an
+# address yet produces no MASQUERADE rule. Both cases look exactly like "子网路由
+# 开机没生效" on multi-NIC boxes. Returning non-zero makes the watchdog retry.
+subnet_rules_complete(){
+  [ -f "$SUBNET_CONF" ] || return 0
+  # Without iptables there is nothing to converge on; report "complete" so the
+  # watchdog does not retry (and log) forever on a box that cannot do this.
+  command -v iptables >/dev/null 2>&1 || return 0
+  local phys zt t missing=0 line
+  phys=$(subnet_get PHY_IFACES)
+  [ -n "$phys" ] || phys=$(subnet_get PHY_IFACE)
+  zt=$(subnet_get ZT_IFACE)
+  [ -n "$phys" ] && [ -n "$zt" ] || return 0
+  for phy in $phys; do
+    line=$(subnet_report_phy "$phy" "$zt")
+    case "$line" in
+      *nat_rule=missing*|*forward_rules=missing*) missing=1 ;;
+    esac
+  done
+  # The policy-routing guard only exists once the tunnel has routes; without it
+  # replies from the NAS's own LAN address get hijacked by fnOS's per-NIC rules.
+  for t in $(subnet_get TARGETS); do
+    ip rule show 2>/dev/null | grep "^$ZT_RULE_PREF:" | grep -F " to $t lookup main" >/dev/null 2>&1 || missing=1
+  done
+  return $missing
+}
+
 # Apply NAT + forwarding for every selected physical interface.
 #   subnet_apply <zerotier-iface> <physical-iface> [physical-iface ...]
-# Several physical NICs can sit in the SAME subnet (multi-homed box): rules are
-# still needed per interface, because the kernel is free to pick either NIC when
-# it forwards and the FORWARD policy is DROP.
 subnet_apply(){
   local zt="$1"; shift
   if [ -z "$zt" ] || [ $# -lt 1 ]; then
@@ -382,16 +530,13 @@ subnet_apply(){
     echo "iptables 不可用，无法配置 NAT 转发" >&2
     return 3
   fi
-  # Core of the trick, per interface: forward between the two interfaces, and
-  # rewrite the source of tunnel traffic so LAN devices know where to reply.
-  # -C first keeps repeated starts from stacking duplicate rules.
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
   subnet_fix_policy_rules "$zt"
   local fail=0 sn
   for phy in "$@"; do
-    # Drop the unrestricted rule left by older versions: it also masqueraded
-    # the NAS's own LAN traffic, which breaks access to the box's own IP on
-    # multi-homed hosts (reply leaves via the other NIC, source gets rewritten).
+    # Drop the unrestricted rule left by older versions: it also masqueraded the
+    # NAS's own LAN traffic, which breaks access to the box's own IP on
+    # multi-homed hosts.
     while iptables -t nat -C POSTROUTING -o "$phy" -j MASQUERADE 2>/dev/null; do
       iptables -t nat -D POSTROUTING -o "$phy" -j MASQUERADE
     done
@@ -418,10 +563,8 @@ subnet_apply(){
     case "$line" in *nat_rule=missing*) all_nat=0 ;; esac
     case "$line" in *forward_rules=missing*) all_fwd=0 ;; esac
   done
-  # Aggregate lines: present only when EVERY interface has the rule.
   [ "$all_nat" = 1 ] && echo "nat_rule=present" || echo "nat_rule=missing"
   [ "$all_fwd" = 1 ] && echo "forward_rules=present" || echo "forward_rules=missing"
-  # Never claim success unless the rules are demonstrably in every table.
   [ "$fail" = 0 ] && [ "$all_nat" = 1 ] && [ "$all_fwd" = 1 ] || return 1
   return 0
 }
@@ -444,7 +587,6 @@ subnet_remove(){
         iptables -t nat -D POSTROUTING '!' -s "$sn" -o "$phy" -j MASQUERADE
       done
     fi
-    # legacy unrestricted rule from older versions
     while iptables -t nat -C POSTROUTING -o "$phy" -j MASQUERADE 2>/dev/null; do
       iptables -t nat -D POSTROUTING -o "$phy" -j MASQUERADE
     done
@@ -456,11 +598,28 @@ subnet_remove(){
   return 0
 }
 
-# Re-apply after a start or reboot.  Rules may name an interface that has not
-# come up yet; iptables stores interface names as plain strings, so the rules
-# simply start matching once the tunnel device appears.
+# Re-register the managed routes recorded in subnet.conf. `stop` withdraws them,
+# and at boot the network may not be connected yet, so the watchdog retries.
+restore_managed_routes(){
+  [ -f "$SUBNET_CONF" ] || return 0
+  [ -x "$WEB_BIN" ] || return 0
+  TRIM_APPNAME="$APPNAME" TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$PKGVAR" \
+  TRIM_PKGTMP="$PKGTMP" TRIM_PKGETC="$ETC" TRIM_SERVICE_PORT="$WEB_PORT" \
+    "$WEB_BIN" --subnet-restore >>"$SUBNET_LOG" 2>&1
+  log "managed routes restored (rc=$?)"
+  return 0
+}
+
+# Re-apply after a start, a reboot or a daemon restart. Rules may name an
+# interface that has not come up yet; iptables stores interface names as plain
+# strings, so they start matching once the tunnel device appears.
+#
+# With "wait", the call is from `start`: give the tunnel device a few seconds to
+# appear so the policy-routing guard is written in the first pass instead of
+# waiting for a watchdog tick.
 apply_subnet_on_boot(){
   [ -f "$SUBNET_CONF" ] || return 0
+  local wait_tun="${1:-}"
   local phys zt rc
   phys=$(subnet_get PHY_IFACES)
   [ -n "$phys" ] || phys=$(subnet_get PHY_IFACE)
@@ -469,41 +628,257 @@ apply_subnet_on_boot(){
     log "subnet.conf incomplete (phys='$phys' zt='$zt'); skipping"
     return 0
   fi
+  if [ "$wait_tun" = "wait" ]; then
+    local i=0
+    while [ $i -lt 20 ]; do
+      ip link show "$zt" >/dev/null 2>&1 && break
+      sleep 1
+      i=$((i+1))
+    done
+    [ $i -ge 20 ] && log "tunnel $zt did not appear within 20s; applying anyway"
+  fi
   # $phys is deliberately unquoted: it is the saved space-separated name list.
   subnet_apply "$zt" $phys >>"$SUBNET_LOG" 2>&1
   rc=$?
   log "subnet routing re-applied: zt=$zt phys=$phys rc=$rc"
+  # The managed routes are withdrawn on stop, so put them back too.
+  restore_managed_routes
+  return 0
+}
+
+# Remove only the local rules, keeping subnet.conf so the next start restores
+# everything. Used by `stop`: leaving NAT/forward rules behind after the app is
+# stopped makes the NAS forward into a dead tunnel.
+subnet_off_local(){
+  [ -f "$SUBNET_CONF" ] || return 0
+  local phys zt
+  phys=$(subnet_get PHY_IFACES)
+  [ -n "$phys" ] || phys=$(subnet_get PHY_IFACE)
+  zt=$(subnet_get ZT_IFACE)
+  [ -n "$phys" ] || return 0
+  subnet_remove "$zt" $phys >>"$SUBNET_LOG" 2>&1
+  log "local subnet rules removed (rc=$?)"
+  return 0
+}
+
+# --- autostart -------------------------------------------------------------
+# fnOS has no manifest switch for "start on boot", so the package registers
+# itself: a systemd unit when systemd is present, a @reboot cron entry
+# otherwise. Both call cmd/main, so there is a single start path.
+
+autostart_mechanism(){
+  if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    echo systemd
+  elif [ -d /etc/cron.d ]; then
+    echo cron
+  else
+    echo none
+  fi
+}
+
+autostart_enable(){
+  local m
+  m=$(autostart_mechanism)
+  case "$m" in
+    systemd)
+      cat > "$SYSTEMD_UNIT" <<EOF
+[Unit]
+Description=ZeroTier ztmesh (fnOS)
+Documentation=https://github.com/ybd156/fnos-ztmesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$APPROOT/cmd/main start
+ExecStop=$APPROOT/cmd/main stop
+TimeoutStartSec=180
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      chmod 0644 "$SYSTEMD_UNIT" 2>/dev/null
+      systemctl daemon-reload >/dev/null 2>&1
+      if ! systemctl enable "$APPNAME.service" >/dev/null 2>&1; then
+        log "autostart: systemctl enable failed, falling back to cron"
+        rm -f "$SYSTEMD_UNIT"
+        m="cron"
+      fi
+      ;;
+  esac
+  if [ "$m" = "cron" ] && [ -d /etc/cron.d ]; then
+    cat > "$CRON_FILE" <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+@reboot root sleep 20; $APPROOT/cmd/main start >/dev/null 2>&1
+EOF
+    chmod 0644 "$CRON_FILE" 2>/dev/null
+  fi
+  if [ "$m" = "none" ]; then
+    echo "enabled=0"
+    echo "mechanism=none"
+    echo "detail=系统既没有 systemd 也没有 /etc/cron.d，无法注册开机自启"
+    log "autostart: no mechanism available"
+    return 1
+  fi
+  printf 'enabled=1\nmechanism=%s\n' "$m" > "$AUTOSTART_CONF" 2>/dev/null
+  echo "enabled=1"
+  echo "mechanism=$m"
+  if [ "$m" = "systemd" ]; then
+    echo "detail=已注册 systemd 服务 $APPNAME.service（开机自动启动）"
+  else
+    echo "detail=已写入 $CRON_FILE（开机 @reboot 自动启动）"
+  fi
+  log "autostart enabled via $m"
+  return 0
+}
+
+autostart_disable(){
+  if [ -f "$SYSTEMD_UNIT" ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl disable "$APPNAME.service" >/dev/null 2>&1
+    systemctl daemon-reload >/dev/null 2>&1
+    rm -f "$SYSTEMD_UNIT"
+  fi
+  rm -f "$CRON_FILE"
+  printf 'enabled=0\nmechanism=none\n' > "$AUTOSTART_CONF" 2>/dev/null
+  echo "enabled=0"
+  echo "mechanism=none"
+  echo "detail=已移除开机自启注册"
+  log "autostart disabled"
+  return 0
+}
+
+autostart_status(){
+  local m enabled=0 detail=""
+  m=$(autostart_mechanism)
+  if [ -f "$SYSTEMD_UNIT" ]; then
+    m="systemd"
+    enabled=1
+    detail="systemd 服务 $APPNAME.service 已注册"
+    if command -v systemctl >/dev/null 2>&1; then
+      local st
+      st=$(systemctl is-enabled "$APPNAME.service" 2>/dev/null)
+      [ -n "$st" ] && detail="systemd 服务 $APPNAME.service（$st）"
+      case "$st" in
+        disabled|masked) enabled=0 ;;
+      esac
+    fi
+  elif [ -f "$CRON_FILE" ]; then
+    m="cron"
+    enabled=1
+    detail="$CRON_FILE 已写入（@reboot）"
+  else
+    m="none"
+    detail="未注册开机自启"
+  fi
+  echo "enabled=$enabled"
+  echo "mechanism=$m"
+  echo "detail=$detail"
+  return 0
+}
+
+# --- start / stop ----------------------------------------------------------
+
+start_all(){
+  local zr=0 wr=0
+  # A fresh start clears the "user stopped the daemon" intent, otherwise the
+  # watchdog would keep honouring it after the app was started again.
+  rm -f "$ZT_DISABLED_FLAG"
+  start_zerotier || zr=1
+  start_web || wr=1
+  # "wait": at boot the tunnel device appears a few seconds after the daemon
+  # starts, and the policy-routing guard needs its routes to exist.
+  apply_subnet_on_boot wait
+  # The watchdog only makes sense once the management backend is actually up;
+  # if the app could not start at all, leave no supervisor behind that keeps
+  # retrying a broken installation.
+  if [ $wr -eq 0 ]; then
+    start_watchdog
+  else
+    log "watchdog not started: web backend failed to start"
+  fi
+  if [ $zr -eq 0 ] && [ $wr -eq 0 ]; then
+    log "start ok"
+    return 0
+  fi
+  log "start finished with errors (zt=$zr web=$wr)"
+  return 1
+}
+
+stop_all(){
+  stop_watchdog
+  # Withdraw the network-side routes first: they are the ones that black-hole a
+  # subnet for every other member when they outlive this node.
+  if [ -x "$WEB_BIN" ]; then
+    TRIM_APPNAME="$APPNAME" TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$PKGVAR" \
+    TRIM_PKGTMP="$PKGTMP" TRIM_PKGETC="$ETC" TRIM_SERVICE_PORT="$WEB_PORT" \
+      "$WEB_BIN" --subnet-withdraw >>"$SUBNET_LOG" 2>&1
+    log "managed routes withdrawn (rc=$?)"
+  fi
+  subnet_off_local
+  stop_web
+  stop_zerotier
+  log "stop ok"
   return 0
 }
 
 case "$1" in
   start)
-    start_zerotier
-    zr=$?
-    start_web
-    wr=$?
-    apply_subnet_on_boot
-    if [ $zr -eq 0 ] && [ $wr -eq 0 ]; then exit 0; else exit 1; fi
+    start_all
+    exit $?
     ;;
   stop)
-    stop_web
-    stop_zerotier
+    stop_all
     exit 0
     ;;
   restart)
-    stop_web; stop_zerotier; sleep 1
-    start_zerotier; zr=$?; start_web; wr=$?
-    apply_subnet_on_boot
-    if [ $zr -eq 0 ] && [ $wr -eq 0 ]; then exit 0; else exit 1; fi
+    stop_all
+    sleep 1
+    start_all
+    exit $?
+    ;;
+  status)
+    # Running means both halves are up AND the backend answers: a PID file alone
+    # would report success for a wedged process.
+    if web_is_running && web_healthy && zt_is_running; then
+      exit 0
+    fi
+    exit 3
     ;;
   zt-start)
-    # daemon only: used by the web UI so that stopping the daemon does not
-    # take the management UI down with it
+    # Daemon only: the web UI uses it so stopping the daemon does not take the
+    # management UI down with it.
+    rm -f "$ZT_DISABLED_FLAG"
     start_zerotier
     exit $?
     ;;
   zt-stop)
+    # Remember the user's intent so the watchdog does not immediately undo it.
+    mkdir -p "$PKGVAR" 2>/dev/null
+    : > "$ZT_DISABLED_FLAG"
     stop_zerotier
+    exit 0
+    ;;
+  supervise)
+    supervise_loop
+    exit 0
+    ;;
+  autostart-enable)
+    autostart_enable
+    exit $?
+    ;;
+  autostart-disable)
+    autostart_disable
+    exit $?
+    ;;
+  autostart-status)
+    autostart_status
+    exit 0
+    ;;
+  subnet-off-local)
+    subnet_off_local
     exit 0
     ;;
   set-option)
@@ -534,8 +909,6 @@ case "$1" in
       exit 1
     fi
     log "set-option: $nwid $opt=$val"
-    # Capture the CLI's output and echo it: the web layer returns this to the UI
-    # so a failure is diagnosable instead of a bare HTTP 500.
     out="$("$setopt_cli" set "$nwid" "$opt=$val" 2>&1)"
     rc=$?
     log "set-option: rc=$rc out=$out"
@@ -543,7 +916,6 @@ case "$1" in
     exit $rc
     ;;
   subnet-up)
-    # Configure NAT + forwarding for every selected LAN interface.
     zt="${2:-}"
     shift 2 2>/dev/null || shift "$#"
     subnet_apply "$zt" "$@"
@@ -566,7 +938,6 @@ case "$1" in
       rm -f "$SUBNET_CONF"
       exit 0
     fi
-    # unquoted $cphys: saved space-separated name list
     subnet_remove "$czt" $cphys
     rc=$?
     rm -f "$SUBNET_CONF"
@@ -574,7 +945,6 @@ case "$1" in
     exit $rc
     ;;
   subnet-status)
-    # Read-only report: ip_forward once, then one line per physical interface.
     zt="${2:-}"
     shift 2 2>/dev/null || shift "$#"
     fwd=$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)
@@ -590,12 +960,8 @@ case "$1" in
     [ "$allfwd" = 1 ] && echo "forward_rules=present" || echo "forward_rules=missing"
     exit 0
     ;;
-  status)
-    if zt_is_running && web_is_running; then exit 0; fi
-    exit 3
-    ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|zt-start|zt-stop|set-option|subnet-up|subnet-down|subnet-cleanup|subnet-status}" >&2
+    echo "Usage: $0 {start|stop|restart|status|zt-start|zt-stop|supervise|autostart-enable|autostart-disable|autostart-status|set-option|subnet-up|subnet-down|subnet-cleanup|subnet-off-local|subnet-status}" >&2
     exit 1
     ;;
 esac

@@ -1,6 +1,6 @@
 #!/bin/bash
 # install_callback — invoked by fnOS AFTER the package files are installed.
-# Prepares permissions and the persistent runtime directories.
+# Prepares permissions, the persistent runtime directories and autostart.
 set -u
 
 APPNAME="${TRIM_APPNAME:-ztmesh}"
@@ -12,13 +12,11 @@ log(){ echo "[${APPNAME}/install_callback] $*" >> "$LOG" 2>/dev/null; }
 
 log "=== install_callback start (APPDEST=$APPDEST) ==="
 
-# --- 1. executable bits ---------------------------------------------------
-# fpk archives do not reliably carry POSIX mode bits, so set them explicitly.
 # --- locate cmd/main ------------------------------------------------------
 # fnOS passes TRIM_APPDEST as the *resolved* payload directory (e.g.
-# /vol1/@appcenter/zerotier), whose parent is NOT the app root: the lifecycle
-# scripts live under /var/apps/<appname>/. Deriving the path from "$APPDEST/.."
-# yields /vol1/@appcenter/cmd/main and fails with exit 127.
+# /vol1/@appcenter/ztmesh), whose parent is NOT the app root: the lifecycle
+# scripts live under /var/apps/<appname>/. Deriving the path from
+# "$APPDEST/.." yields /vol1/@appcenter/cmd/main and fails with exit 127.
 find_main(){
   local c
   for c in "/var/apps/$APPNAME/cmd/main" \
@@ -32,7 +30,12 @@ find_main(){
 MAIN="$(find_main)" || MAIN=""
 APPROOT="${MAIN%/cmd/main}"
 [ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
+
+# --- 1. executable bits ---------------------------------------------------
+# fpk archives do not reliably carry POSIX mode bits, so set them explicitly.
+# The Go backend and the ZeroTier daemon are both useless without +x.
 chmod 0755 "$APPDEST/zt/zerotier-one" 2>>"$LOG" || log "chmod zerotier-one failed"
+chmod 0755 "$APPDEST/bin/ztmesh-server" 2>>"$LOG" || log "chmod ztmesh-server failed"
 if [ -d "$APPROOT/cmd" ]; then
   chmod 0755 "$APPROOT"/cmd/* 2>>"$LOG" || log "chmod cmd/* failed"
 fi
@@ -76,11 +79,21 @@ if [ -n "${wizard_network_id:-}" ]; then
   esac
 fi
 
-# --- 5. record installed version ------------------------------------------
+# --- 5. record installed version -----------------------------------------
 VERSION_FILE="$PKGVAR/VERSION"
 if [ -f "$APPROOT/manifest" ]; then
   sed -n 's/^version=//p' "$APPROOT/manifest" > "$VERSION_FILE" 2>>"$LOG"
   log "recorded version: $(cat "$VERSION_FILE" 2>/dev/null)"
+fi
+
+# --- 6. register autostart ------------------------------------------------
+# The app should come back by itself after the NAS reboots; fnOS has no
+# manifest switch for that, so the lifecycle script owns the registration.
+if [ -x "$MAIN" ]; then
+  OUT="$("$MAIN" autostart-enable 2>&1)"
+  log "autostart-enable rc=$? $OUT"
+else
+  log "WARNING: $MAIN not executable; autostart not registered"
 fi
 
 log "=== install_callback ok ==="

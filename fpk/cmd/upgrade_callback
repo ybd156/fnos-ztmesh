@@ -32,6 +32,7 @@ log "=== upgrade_callback start ==="
 
 # --- 1. restore executable bits on the new payload ------------------------
 chmod 0755 "$APPDEST/zt/zerotier-one" 2>>"$LOG" || log "chmod zerotier-one failed"
+chmod 0755 "$APPDEST/bin/ztmesh-server" 2>>"$LOG" || log "chmod ztmesh-server failed"
 if [ -d "$APPROOT/cmd" ]; then
   chmod 0755 "$APPROOT"/cmd/* 2>>"$LOG" || log "chmod cmd/* failed"
 fi
@@ -45,7 +46,24 @@ else
   log "no existing identity; a new node address will be generated at start"
 fi
 
-# --- 3. restart ------------------------------------------------------------
+# --- 3. record the new version --------------------------------------------
+# install_callback writes $PKGVAR/VERSION, but an upgrade may go through
+# upgrade_callback instead, which left the file (and anything displaying it)
+# showing the old version.
+if [ -f "$APPROOT/manifest" ]; then
+  sed -n 's/^version=//p' "$APPROOT/manifest" > "$PKGVAR/VERSION" 2>>"$LOG"
+  log "recorded version: $(cat "$PKGVAR/VERSION" 2>/dev/null)"
+fi
+
+# --- 4. refresh autostart --------------------------------------------------
+# An upgrade keeps the registration, but re-applying it repairs a unit that an
+# older version never created (or one that pointed at the removed node entry).
+if [ -x "$MAIN" ]; then
+  OUT="$("$MAIN" autostart-enable 2>&1)"
+  log "autostart-enable rc=$? $OUT"
+fi
+
+# --- 5. restart ------------------------------------------------------------
 if [ -x "$MAIN" ]; then
   "$MAIN" start >>"$LOG" 2>&1
   log "service start rc=$?"

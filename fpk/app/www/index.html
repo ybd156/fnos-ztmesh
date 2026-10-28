@@ -28,7 +28,7 @@
         <span class="dot" id="serviceDot"></span>
         <span id="serviceLabel">服务检测中…</span>
       </div>
-      <div class="ss-row" id="serviceControls" style="display:none">
+      <div class="ss-row hidden" id="serviceControls">
         <button class="btn btn-sm" id="btnStart">启动服务</button>
         <button class="btn btn-sm" id="btnStop">停止服务</button>
       </div>
@@ -51,8 +51,10 @@
           <div class="card-value" id="ov-online">—</div>
         </div>
         <div class="card">
-          <div class="card-label">版本</div>
+          <div class="card-label">ZeroTier 版本</div>
           <div class="card-value" id="ov-version">—</div>
+          <div class="card-label" style="margin-top:10px">应用版本</div>
+          <div class="card-value mono" id="ov-appversion">—</div>
         </div>
         <div class="card">
           <div class="card-label">已加入网络</div>
@@ -72,6 +74,19 @@
         <div class="join-row">
           <input id="ov-networkId" class="input" placeholder="输入 16 位网络 ID 加入网络，例如 8056c2e21c000001" />
           <button class="btn btn-primary" id="btnJoinQuick">加入网络</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="section-head">
+          <h3>开机自启</h3>
+          <span class="net-status offline" id="autostartBadge">检测中…</span>
+        </div>
+        <p class="hint" id="autostartHint">
+          NAS 重启后自动拉起 ZeroTier 守护进程与管理界面；服务意外退出时由看门狗自动恢复。
+        </p>
+        <div class="join-row">
+          <button class="btn" id="btnAutostartOn">开启开机自启</button>
+          <button class="btn btn-danger" id="btnAutostartOff">关闭开机自启</button>
         </div>
       </div>
     </section>

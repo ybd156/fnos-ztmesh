@@ -52,6 +52,16 @@ document.querySelectorAll('.nav-item').forEach((btn) => {
 });
 
 /* ---------- overview ---------- */
+/* A failed status call must not leave the previous values on screen: a stale
+ * node address is worse than an obvious dash. */
+function clearOverview() {
+  ['#ov-address', '#ov-address2', '#ov-version', '#ov-nnetworks', '#ov-appversion'].forEach((s) => {
+    const el = $(s);
+    if (el) el.textContent = '—';
+  });
+  const on = $('#ov-online');
+  if (on) { on.textContent = '未知'; on.style.color = 'var(--muted, #888)'; }
+}
 async function loadStatus() {
   try {
     const s = await api('/status');
@@ -61,10 +71,32 @@ async function loadStatus() {
     $('#ov-online').textContent = s.online ? '在线' : '离线';
     $('#ov-online').style.color = s.online ? 'var(--green)' : 'var(--red)';
     $('#ov-version').textContent = s.version || s.zeroTierVersion || '—';
+  } catch (e) {
+    clearOverview();
+    return;
+  }
+  try {
     const nets = await api('/network');
     $('#ov-nnetworks').textContent = Array.isArray(nets) ? nets.length : 0;
   } catch (e) {
-    console.warn('status load failed:', e);
+    $('#ov-nnetworks').textContent = '—';
+  }
+  loadAppVersion();
+}
+
+/* 应用版本由后端自报（/api/ping），与 manifest 的 version 同源，
+ * 升级后能一眼确认跑的是哪个版本，而不用去应用中心翻。 */
+let appVersionLoaded = false;
+async function loadAppVersion() {
+  if (appVersionLoaded) return;
+  try {
+    const p = await api('/ping');
+    const el = $('#ov-appversion');
+    if (el) el.textContent = p && p.version ? 'v' + p.version : '—';
+    appVersionLoaded = true;
+  } catch (e) {
+    const el = $('#ov-appversion');
+    if (el) el.textContent = '—';
   }
 }
 function fmtBytes(n) {
@@ -293,8 +325,19 @@ async function toggleTokenVisibility() {
     if (!inp.value.trim() && !tokenAutoFilled) {
       try {
         const r = await api('/subnet/token', 'GET');
-        if (r && r.token) { inp.value = r.token; tokenAutoFilled = true; }
-        else { toast('尚未保存 API Token', 'error'); return; }
+        if (r && r.token) {
+          inp.value = r.token;
+          tokenAutoFilled = true;
+        } else if (r && r.tokenSaved) {
+          // The full token is a secret and is only released to a caller that
+          // proved it came through the fnOS gateway (or loopback).
+          toast('已保存令牌：' + (r.tokenPreview || '****') +
+            '（完整内容仅在本机或局域网内可查看）', 'error');
+          return;
+        } else {
+          toast('尚未保存 API Token', 'error');
+          return;
+        }
       } catch (e) { toast('读取已保存令牌失败：' + e.message, 'error'); return; }
     }
     inp.type = 'text';
@@ -313,9 +356,18 @@ function resetTokenToggle() {
 }
 
 /* ---------- service control ---------- */
+/* The sidebar controls were permanently invisible in 1.2.0: the markup hid
+ * them with an inline style and nothing ever removed it. They are now shown
+ * once the first health probe completes, with the impossible action disabled. */
 function setServiceState(on) {
   $('#serviceDot').className = 'dot ' + (on ? 'online' : 'offline');
   $('#serviceLabel').textContent = on ? '服务运行中' : '服务未运行';
+  const box = $('#serviceControls');
+  if (box) box.classList.remove('hidden');
+  const start = $('#btnStart');
+  const stop = $('#btnStop');
+  if (start) start.disabled = on;
+  if (stop) stop.disabled = !on;
 }
 async function checkService() {
   try { await api('/status'); setServiceState(true); }
@@ -486,7 +538,7 @@ async function loadSubnet() {
   }
 
   $('#subnetTokenState').textContent = info.tokenSaved
-    ? '已保存 API Token（默认隐藏，点输入框右侧「显示」可查看完整内容）'
+    ? '已保存 API Token（点「显示」可查看；公网访问只显示掩码预览）'
     : '未保存 API Token —— 只有该网络由本机自建控制器托管时，才能不填令牌自动添加托管路由';
 
   const on = !!info.config;
@@ -535,8 +587,24 @@ async function subnetOn() {
 }
 
 async function subnetOff() {
-  if (!confirm('确定关闭子网路由吗？\n\n本机将停止转发这个网段，ZeroTier 网络上的托管路由也会被移除。')) return;
   const btn = $('#btnSubnetOff');
+  /* 与「离开网络」一致的两步内联确认：第一次点击只进入待确认状态，3 秒内
+   * 再点一次才真正执行，不再用浏览器全局 confirm 弹窗。 */
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = '再点一次确认关闭';
+    btn.classList.add('btn-armed');
+    setTimeout(() => {
+      if (btn.dataset.armed === '1') {
+        btn.dataset.armed = '';
+        btn.textContent = '关闭子网路由';
+        btn.classList.remove('btn-armed');
+      }
+    }, 3000);
+    return;
+  }
+  btn.dataset.armed = '';
+  btn.classList.remove('btn-armed');
   btn.disabled = true;
   btn.textContent = '关闭中…';
   try {
@@ -578,6 +646,60 @@ async function clearSubnetToken() {
   await loadSubnet();
 }
 
+/* ---------- autostart ---------- */
+/* fnOS has no manifest switch for "start after boot"; the package registers a
+ * systemd unit (or a @reboot cron entry). The UI only reflects what the backend
+ * reports, so a failed registration is visible instead of silently assumed. */
+let autostartState = null;
+
+function renderAutostart(st) {
+  autostartState = st || null;
+  const badge = $('#autostartBadge');
+  const hint = $('#autostartHint');
+  const on = !!(st && st.enabled);
+  if (badge) {
+    badge.textContent = on ? '已开启' : '未开启';
+    badge.className = 'net-status ' + (on ? 'ok' : 'offline');
+  }
+  if (hint) {
+    const detail = st && st.detail ? String(st.detail) : '';
+    hint.textContent = detail || (on
+      ? 'NAS 重启后会自动拉起 ZeroTier 守护进程与管理界面。'
+      : '当前未注册开机自启：NAS 重启后需要手动到应用中心启动。');
+  }
+  const onBtn = $('#btnAutostartOn');
+  const offBtn = $('#btnAutostartOff');
+  if (onBtn) onBtn.disabled = on;
+  if (offBtn) offBtn.disabled = !on;
+}
+
+async function loadAutostart() {
+  try {
+    renderAutostart(await api('/autostart'));
+  } catch (e) {
+    const badge = $('#autostartBadge');
+    if (badge) { badge.textContent = '未知'; badge.className = 'net-status offline'; }
+    const hint = $('#autostartHint');
+    if (hint) hint.textContent = '读取开机自启状态失败：' + e.message;
+  }
+}
+
+async function setAutostart(enabled, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '处理中…';
+  try {
+    const st = await api('/autostart', 'POST', { enabled: enabled });
+    renderAutostart(st);
+    toast(enabled ? '已开启开机自启' : '已关闭开机自启');
+  } catch (e) {
+    toast('设置开机自启失败：' + e.message, 'error');
+  } finally {
+    btn.textContent = label;
+    if (autostartState) renderAutostart(autostartState);
+  }
+}
+
 /* ---------- helpers ---------- */
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -590,11 +712,22 @@ $('#btnJoin2').addEventListener('click', () => joinNetwork($('#joinId').value));
 $('#btnJoinQuick').addEventListener('click', () => joinNetwork($('#ov-networkId').value));
 $('#joinId').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinNetwork($('#joinId').value); });
 $('#ov-networkId').addEventListener('keydown', (e) => { if (e.key === 'Enter') joinNetwork($('#ov-networkId').value); });
-$('#btnCopyAddress').addEventListener('click', () => {
-  navigator.clipboard.writeText($('#ov-address').textContent).then(() => toast('设备地址已复制'));
+$('#btnCopyAddress').addEventListener('click', async () => {
+  const addr = $('#ov-address').textContent.trim();
+  if (!addr || addr === '—') { toast('还没有拿到设备地址', 'error'); return; }
+  try {
+    await navigator.clipboard.writeText(addr);
+    toast('设备地址已复制');
+  } catch (e) {
+    toast('复制失败，请手动选中复制：' + addr, 'error');
+  }
 });
 $('#btnStart').addEventListener('click', svcStart);
 $('#btnStop').addEventListener('click', svcStop);
+
+/* autostart controls */
+$('#btnAutostartOn').addEventListener('click', () => setAutostart(true, $('#btnAutostartOn')));
+$('#btnAutostartOff').addEventListener('click', () => setAutostart(false, $('#btnAutostartOff')));
 
 /* subnet routing controls */
 $('#subnetPhy').addEventListener('change', syncTargetDefault);
@@ -604,11 +737,56 @@ $('#btnSaveToken').addEventListener('click', saveSubnetToken);
 $('#btnClearToken').addEventListener('click', clearSubnetToken);
 $('#btnToggleToken').addEventListener('click', toggleTokenVisibility);
 
-/* manual refresh buttons */
-$('#btnRefreshNet').addEventListener('click', () => { holdRefreshUntil = 0; loadNetworks(); loadStatus(); toast('网络列表已刷新'); });
-$('#btnRefreshPeers').addEventListener('click', () => { loadPeers(); toast('对端列表已刷新'); });
-$('#btnRefreshStats').addEventListener('click', () => { loadNetStats(); });
+/* Manual refresh buttons: disable while the request is in flight so a double
+ * click cannot queue two refreshes and repaint the list twice. */
+function busyButton(btn, busyText, fn) {
+  return async () => {
+    if (btn.disabled) return;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = busyText;
+    try { await fn(); } finally { btn.disabled = false; btn.textContent = label; }
+  };
+}
+$('#btnRefreshNet').addEventListener('click', busyButton($('#btnRefreshNet'), '刷新中…', async () => {
+  holdRefreshUntil = 0;
+  await loadNetworks();
+  await loadStatus();
+  toast('网络列表已刷新');
+}));
+$('#btnRefreshPeers').addEventListener('click', busyButton($('#btnRefreshPeers'), '刷新中…', async () => {
+  await loadPeers();
+  toast('对端列表已刷新');
+}));
+$('#btnRefreshStats').addEventListener('click', busyButton($('#btnRefreshStats'), '刷新中…', async () => {
+  await loadNetStats();
+}));
 
-function refresh() { loadStatus(); loadNetworks(); loadPeers(); checkService(); loadNetStats(); }
+/* Only poll what the user can actually see: the old code refreshed every view
+ * on every tick, which wasted requests and could repaint a form the user was
+ * editing. */
+function currentView() {
+  const active = document.querySelector('.nav-item.active');
+  return active && active.dataset.view ? active.dataset.view : 'overview';
+}
+
+function refresh() {
+  if (document.hidden) return;
+  const view = currentView();
+  loadStatus();
+  checkService();
+  if (view === 'overview') {
+    loadNetStats();
+    loadAutostart();
+  } else if (view === 'networks') {
+    loadNetworks();
+  } else if (view === 'peers') {
+    loadPeers();
+  }
+  /* 子网路由页不自动轮询：那里有复选框和令牌输入框，自动刷新会打断用户操作。 */
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+
 refresh();
 setInterval(refresh, 8000);

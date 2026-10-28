@@ -100,6 +100,11 @@ body {
 .btn-sm { padding: 5px 10px; font-size: 12px; }
 .btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
 .btn-danger:hover { background: rgba(239,68,68,.12); }
+/* 两步确认的“待确认”状态：第一次点击后按钮需要明显变化，否则用户不知道
+ * 还要再点一次（离开网络、关闭子网路由都用这个类）。 */
+.btn-armed { border-color: var(--red); color: var(--red); background: rgba(239,68,68,.12); }
+.btn:disabled { opacity: .55; cursor: not-allowed; }
+
 
 .list { display: flex; flex-direction: column; gap: 12px; }
 .net-card {

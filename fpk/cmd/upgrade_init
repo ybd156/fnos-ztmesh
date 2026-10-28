@@ -37,7 +37,7 @@ else
   # kill the independently published ZeroTier app running alongside this one.
   log "WARNING: $MAIN not executable, falling back to pkill"
   pkill -f "$APPDEST/zt/zerotier-one" >>"$LOG" 2>&1 || true
-  pkill -f "$APPDEST/server/server.js" >>"$LOG" 2>&1 || true
+  pkill -f "$APPDEST/bin/ztmesh-server" >>"$LOG" 2>&1 || true
 fi
 
 log "=== upgrade_init ok ==="

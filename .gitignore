@@ -7,6 +7,17 @@
 /_raw/
 /_zt_*.deb
 
+# 打包产物：Go 二进制只在临时 staging 里编译，不进源码树
+/fpk/app/bin/
+*.fpk
+
+# 构建缓存与开发测试产物
+/.gobuild/
+/tests/run/
+/tests/*.exe
+/tests/*.state
+/tests/smoke.out
+
 # 测试运行产物
 /test-var/
 /test-tmp/

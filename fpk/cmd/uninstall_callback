@@ -15,7 +15,7 @@ log "=== uninstall_callback start ==="
 # Scope to this app's install path: another ZeroTier-derived app may coexist and
 # must not be killed by an uninstall it does not belong to.
 pkill -f "$APPDEST/zt/zerotier-one" >>"$LOG" 2>&1 || true
-pkill -f "$APPDEST/server/server.js" >>"$LOG" 2>&1 || true
+pkill -f "$APPDEST/bin/ztmesh-server" >>"$LOG" 2>&1 || true
 
 rm -rf "$PKGTMP" >>"$LOG" 2>&1 || log "failed to remove $PKGTMP"
 
