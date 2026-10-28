@@ -209,11 +209,17 @@ Central API Token 也只在可信入口按需下发一次（见上文）。
 python pack.py x86_64
 
 # arm64 安装包 -> ztmesh-arm.fpk
+#   仓库里只放了 x86-64 版守护进程，arm 构建前先取一份 arm64 的（一次性，约 10MB）
+python scripts/fetch_zerotier_arm.py
 python pack.py arm
 
 # 不带参数等价于 x86_64
 python pack.py
 ```
+
+`scripts/fetch_zerotier_arm.py` 直接下载官方 `zerotier-one_<版本>_arm64.deb`，用标准库
+（`tarfile` + `lzma`）解出 `usr/sbin/zerotier-one` 写到 `dl/zerotier-one.arm64`，
+不依赖 `dpkg-deb`/`ar`/`xz`，Windows 上也能跑。
 
 构建过程：
 
