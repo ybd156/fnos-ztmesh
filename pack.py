@@ -18,20 +18,15 @@
 内层 `app.tgz`：`app/` 目录树的 gzip'd tar（成员名相对 `app/`，即 `ui/config`、
       `www/index.html`、`zt/zerotier-one`、`bin/ztmesh-server`）。
 
-单包多架构（all）
------------------
-`python pack.py`（默认）生成 `ztmesh-all.fpk`，manifest 写 `platform=all`，
+单包多架构
+----------
+`python pack.py` 只生成 **`ztmesh-all.fpk`**，manifest 写 `platform=all`，
 包内同时带两套二进制，安装时由 `cmd/install_callback` 按 `uname -m` 链接：
 
     bin/ztmesh-server-amd64        zt/zerotier-one-x86_64
     bin/ztmesh-server-arm64        zt/zerotier-one-aarch64
 
-也仍然可以只出单架构包（体积更小）：
-
-    python pack.py x86_64   ->  ztmesh-x86_64.fpk   （platform=x86）
-    python pack.py arm      ->  ztmesh-arm.fpk      （platform=arm）
-
-单架构包用不带后缀的名字（`bin/ztmesh-server`、`zt/zerotier-one`）。
+一个包通吃两种架构，不再区分 x86 / arm 安装包。
 
 arm64 守护进程从哪来
 --------------------
@@ -87,12 +82,10 @@ SKIP_FILES = {'.DS_Store', 'Thumbs.db'}
 ARCH_AMD64 = ('amd64', 62, 'x86_64')
 ARCH_ARM64 = ('arm64', 183, 'aarch64')
 
-#: 目标平台 -> (架构列表, manifest platform, 产物名)
-TARGETS = {
-    'all': ([ARCH_AMD64, ARCH_ARM64], 'all', 'ztmesh-all.fpk'),
-    'x86_64': ([ARCH_AMD64], 'x86', 'ztmesh-x86_64.fpk'),
-    'arm': ([ARCH_ARM64], 'arm', 'ztmesh-arm.fpk'),
-}
+#: 只出单包多架构：一个 .fpk 同时带 x86-64 与 arm64 两套二进制
+ARCHES = [ARCH_AMD64, ARCH_ARM64]
+MANIFEST_PLATFORM = 'all'
+FPK_NAME = 'ztmesh-all.fpk'
 
 #: fnOS 外层归档里必须存在的骨架目录/文件
 OUTER_DIRS = ('cmd', 'config', 'wizard')
@@ -107,14 +100,11 @@ REQUIRED_CMD = (
     'config_init', 'config_callback',
 )
 
-PLATFORM = (sys.argv[1] if len(sys.argv) > 1 else 'all').strip()
-if PLATFORM not in TARGETS:
-    sys.stderr.write('用法: python pack.py [all|x86_64|arm]\n')
+if len(sys.argv) > 1:
+    sys.stderr.write('用法: python pack.py    （只构建 ztmesh-all.fpk：一个包同时支持 x86-64 与 arm64）\n')
     sys.exit(2)
 
-ARCHES, MANIFEST_PLATFORM, FPK_NAME = TARGETS[PLATFORM]
 FPK = os.path.join(HERE, FPK_NAME)
-MULTI_ARCH = len(ARCHES) > 1
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +407,7 @@ def stage_app_tree(staging, goarch_pairs):
     os.makedirs(zt_dir, exist_ok=True)
 
     for goarch, machine, tag in goarch_pairs:
-        suffix = '' if not MULTI_ARCH else '-' + goarch
+        suffix = '-' + goarch
         server_out = os.path.join(bin_dir, 'ztmesh-server' + suffix)
         build_server_binary(server_out, goarch, machine)
 
@@ -433,7 +423,7 @@ def stage_app_tree(staging, goarch_pairs):
         if got != machine:
             fail('%s 架构不匹配（e_machine=%s，期望 %d）'
                  % (rel_to_here(core_src), got, machine))
-        core_suffix = '' if not MULTI_ARCH else '-' + tag
+        core_suffix = '-' + tag
         shutil.copy2(core_src, os.path.join(zt_dir, 'zerotier-one' + core_suffix))
         say('>> 放入守护进程: zt/zerotier-one%s (%s, e_machine=%d)'
             % (core_suffix, tag, got))
@@ -601,12 +591,8 @@ def self_check(app_tgz, digest):
 
             inner_names = [m.name for m in a.getmembers()]
             for goarch, machine, tag in ARCHES:
-                if MULTI_ARCH:
-                    server_rel = '%s-%s' % (SERVER_REL, goarch)
-                    core_rel = 'zt/zerotier-one-%s' % tag
-                else:
-                    server_rel = SERVER_REL
-                    core_rel = 'zt/zerotier-one'
+                server_rel = '%s-%s' % (SERVER_REL, goarch)
+                core_rel = 'zt/zerotier-one-%s' % tag
                 for rel in (server_rel, core_rel):
                     if rel not in inner_names:
                         fail('app.tgz 缺少 %s' % rel)
@@ -621,8 +607,8 @@ def self_check(app_tgz, digest):
 
 
 def main():
-    say('>> 目标平台: %s (manifest platform=%s, 架构: %s)'
-        % (PLATFORM, MANIFEST_PLATFORM, ', '.join(a[0] for a in ARCHES)))
+    say('>> 目标: 单包多架构 (manifest platform=%s, 架构: %s)'
+        % (MANIFEST_PLATFORM, ', '.join(a[0] for a in ARCHES)))
     verify_skeleton()
 
     mtime = build_timestamp()

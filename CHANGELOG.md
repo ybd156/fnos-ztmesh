@@ -13,18 +13,19 @@
 次版本号提升：单包多架构 + 应用内升级 ZeroTier 核心，向后兼容。
 
 ### 新增
-- **单包多架构**：`python pack.py`（默认）生成 `ztmesh-all.fpk`，manifest 写 `platform=all`，
+- **单包多架构（唯一产物）**：`python pack.py` 只生成 `ztmesh-all.fpk`，manifest 写 `platform=all`，
   包内同时带 `bin/ztmesh-server-amd64|arm64` 与 `zt/zerotier-one-x86_64|aarch64`；
-  `install_callback` 按 `uname -m` 软链接出本机要用的 `bin/ztmesh-server` 与 `zt/zerotier-one`
-  （软链接省掉第二份 10MB 副本），`upgrade_callback` 在单架构包与多架构包之间切换时也会重建链接
+  不再提供 x86 / arm 两个独立安装包。`install_callback` 按 `uname -m` 软链接出本机要用的
+  `bin/ztmesh-server` 与 `zt/zerotier-one`（省掉第二份 10MB 副本），`upgrade_callback` 也会重建链接
 - **应用内升级 ZeroTier 核心**：概览页新增「ZeroTier 核心」卡片，可检查更新、一键升级、回滚。
   后端从 `download.zerotier.com` 取官方 `.deb`，Go 里解析 ar 容器、系统 `tar` 解出
   `usr/sbin/zerotier-one`，校验 ELF 架构后停守护进程 → 原子替换 → 重启；
   旧核心留在 `$TRIM_PKGVAR/zt-bin/zerotier-one.prev` 供回滚。新核心装到 `$TRIM_PKGVAR/zt-bin/`
   （不在应用目录），重装/升级应用不会覆盖，`cmd/main` 优先使用它
 - 新接口：`GET /api/core`、`POST /api/core/update`、`POST /api/core/rollback`（后两者仅可信来源）
-- manifest 补充 `maintainer_url`（<https://github.com/ybd156>）与
-  `distributor_url`（<https://github.com/ybd156/fnos-ztmesh>），发布者改为仓库路径
+- manifest 维护者信息改为可点击链接：`maintainer=ybd156` +
+  `maintainer_url=https://github.com/ybd156`，`distributor=fnos-ztmesh` +
+  `distributor_url=https://github.com/ybd156/fnos-ztmesh`
 - `verify_fpk.js` 支持多架构包：逐个校验四个二进制的 ELF `e_machine`
 - 冒烟测试跨平台化（Windows 用 Go 桩程序、Linux/WSL 用 bash 桩脚本），新增核心检查/升级/回滚断言
 

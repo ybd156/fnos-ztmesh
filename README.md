@@ -11,9 +11,9 @@
 > 本应用**无需任何外部运行时**：管理后端是 Go 静态二进制，安装时不会拉取任何依赖应用。
 > 单包里带了两套二进制，`install_callback` 按 `uname -m` 把本机架构的那份软链接成
 > `bin/ztmesh-server` 与 `zt/zerotier-one`；`install_init` 会在安装前校验架构。
-> 需要更小的单架构包时，可自行构建 `ztmesh-x86_64.fpk` / `ztmesh-arm.fpk`（见「从源码构建」）。
+> 只发布这一个包：不再区分 x86 / arm 安装包。
 
-> 维护者：<https://github.com/ybd156> ｜ 发布者：<https://github.com/ybd156/fnos-ztmesh>
+> 维护者：`ybd156`（<https://github.com/ybd156>） ｜ 发布者：`fnos-ztmesh`（<https://github.com/ybd156/fnos-ztmesh>）
 
 ### 管理界面入口与端口
 
@@ -227,12 +227,8 @@ Central API Token 也只在可信入口按需下发一次（见上文）。
 管理后端源码在 `server/`，打包脚本不调用 `fnpack.exe`，纯 Python 直接生成 `.fpk`。
 
 ```bash
-# 默认：单包多架构 -> ztmesh-all.fpk（manifest platform=all，含两套二进制）
+# 唯一产物：ztmesh-all.fpk（manifest platform=all，含 x86-64 与 arm64 两套二进制）
 python pack.py
-
-# 只出单架构包（体积更小）
-python pack.py x86_64     # -> ztmesh-x86_64.fpk（platform=x86）
-python pack.py arm        # -> ztmesh-arm.fpk   （platform=arm）
 ```
 
 多架构包需要 arm64 版守护进程（仓库里只放了 x86-64 的）：
@@ -265,6 +261,5 @@ python scripts/fetch_zerotier_arm.py   # 从官方 deb 取出 dl/zerotier-one.ar
 
 ```bash
 node verify_fpk.js ztmesh-all.fpk
-node verify_fpk.js ztmesh-x86_64.fpk
 ```
 
