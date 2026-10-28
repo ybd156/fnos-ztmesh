@@ -326,6 +326,16 @@ def prepare_tree():
     return appdest, pkgvar, pkgtmp
 
 
+def manifest_version():
+    """从 fpk/manifest 读版本号，避免每次发版都改测试。"""
+    path = os.path.join(ROOT, 'fpk', 'manifest')
+    with open(path, encoding='utf-8') as fh:
+        for line in fh:
+            if line.startswith('version='):
+                return line.split('=', 1)[1].strip()
+    return ''
+
+
 def elf_machine(path):
     with open(path, 'rb') as fh:
         head = fh.read(20)
@@ -390,7 +400,8 @@ def main():
         print('== 基础 ==')
         code, body = http('GET', '/api/ping')
         check(code == 200 and body.get('ok'), 'GET /api/ping', body)
-        check(body.get('version') == '2.1.0', '后端自报版本与 manifest 一致', body.get('version'))
+        check(body.get('version') == manifest_version(),
+              '后端自报版本与 manifest 一致', (body.get('version'), manifest_version()))
 
         code, body = http('GET', '/api/health')
         check(code == 200 and body['zt']['reachable'] is True, 'GET /api/health 能探测守护进程', body)

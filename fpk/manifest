@@ -1,5 +1,5 @@
 appname=ztmesh
-version=2.1.0
+version=2.1.1
 display_name=ZeroTier异地组网-虚拟局域网
 desc=ZeroTier异地组网-虚拟局域网（VLAN/VPN）：将飞牛NAS接入 ZeroTier 虚拟网络，实现异地设备安全互联、内网穿透、远程访问与组网。单包同时支持 x86-64 与 arm64，并可在界面内升级 ZeroTier 核心。
 source=thirdparty
@@ -12,6 +12,9 @@ os_min_version=1.0.0
 desktop_uidir=ui
 desktop_applaunchname=ztmesh.main
 ctl_stop=true
-checkport=true
+# 端口交给应用自己接管：fnOS 的 checkport 预检查会在端口被占用时直接拒绝启动
+# （弹「端口被占用」），而最常见的原因恰恰是应用上一次的进程残留。
+# cmd/main start 现在先判断占用者是不是自己：是就清掉继续启动，不是才报明确错误。
+checkport=false
 service_port=13443
-changelog=2.1.0：单包同时支持 x86-64 与 arm64；可在界面内检查并升级 ZeroTier 核心（支持回滚）；维护者/发布者改为 GitHub 链接。
+changelog=2.1.1：修复应用中心「端口被占用」导致无法启用（改为应用自己接管端口、清理残留进程）；2.1.0：单包同时支持 x86-64 与 arm64，可在界面内升级 ZeroTier 核心。

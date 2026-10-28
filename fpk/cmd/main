@@ -105,6 +105,26 @@ fi
 # is_pid_alive <pid> [expected-exe] -> 0 alive, 1 dead
 # A PID file alone is not proof: PIDs are reused after a reboot, so when an
 # expected executable is given the process must also be that executable.
+#
+# The multi-arch package installs symlinks (bin/ztmesh-server ->
+# bin/ztmesh-server-amd64), and /proc/<pid>/exe reports the *resolved* path.
+# Comparing only against the symlink therefore never matched, which made every
+# liveness check fail -- the watchdog then kept "restarting" a perfectly healthy
+# process (and killed it on the way). Both spellings are accepted.
+exe_matches(){
+  local exe="$1" want="$2" real
+  [ -n "$exe" ] && [ -n "$want" ] || return 1
+  case "$exe" in
+    "$want"|"$want (deleted)") return 0 ;;
+  esac
+  real=$(readlink -f "$want" 2>/dev/null)
+  [ -n "$real" ] || return 1
+  case "$exe" in
+    "$real"|"$real (deleted)") return 0 ;;
+  esac
+  return 1
+}
+
 is_pid_alive(){
   local p="$1" want="${2:-}"
   [ -n "$p" ] || return 1
@@ -112,10 +132,8 @@ is_pid_alive(){
   if [ -n "$want" ]; then
     local exe
     exe=$(readlink "/proc/$p/exe" 2>/dev/null) || return 1
-    case "$exe" in
-      "$want"|"$want (deleted)") return 0 ;;
-      *) return 1 ;;
-    esac
+    exe_matches "$exe" "$want" && return 0
+    return 1
   fi
   return 0
 }
@@ -155,7 +173,8 @@ find_zt_pid(){
   fi
   for p in /proc/[0-9]*; do
     exe=$(readlink "$p/exe" 2>/dev/null) || continue
-    if [ "$exe" = "$ZT_BIN" ]; then
+    # Same symlink caveat as is_pid_alive: match the resolved target too.
+    if exe_matches "$exe" "$ZT_BIN"; then
       basename "$p"
       return 0
     fi
@@ -253,6 +272,91 @@ stop_zerotier(){
 
 # --- web backend -----------------------------------------------------------
 
+# Which process is listening on a TCP port? Empty when the port is free.
+# Uses ss (iproute2 ships with fnOS because cmd/main already relies on `ip`),
+# with a /proc/net fallback that needs no extra tooling.
+port_listen_pid(){
+  local port="$1" pid=""
+  if command -v ss >/dev/null 2>&1; then
+    pid=$(ss -ltnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n1)
+    [ -n "$pid" ] && { echo "$pid"; return 0; }
+  fi
+  # Fallback: map the listening socket inode from /proc/net/tcp{,6} to a pid.
+  local hex inodes p fd link
+  hex=$(printf '%04X' "$port")
+  inodes=$(awk -v h="$hex" '$2 ~ ":" h "$" && $4 == "0A" {print $10}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u)
+  [ -n "$inodes" ] || return 1
+  for p in /proc/[0-9]*; do
+    for fd in "$p"/fd/*; do
+      link=$(readlink "$fd" 2>/dev/null) || continue
+      case "$link" in
+        socket:\[*\])
+          for i in $inodes; do
+            if [ "$link" = "socket:[$i]" ]; then
+              basename "$p"
+              return 0
+            fi
+          done
+          ;;
+      esac
+    done
+  done 2>/dev/null
+  return 1
+}
+
+# Is this pid one of ours (current backend, or the Node backend of 1.2.x)?
+pid_is_ours(){
+  local pid="$1" cmd
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] || return 1
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  case "$cmd" in
+    *"$APPDEST"*|*ztmesh-server*|*ztmesh*) return 0 ;;
+  esac
+  return 1
+}
+
+# fnOS 的 checkport 预检查会在端口被占用时直接弹「端口被占用」并拒绝启动，
+# 而我们自己上一次的进程（或 1.2.x 的 node 后端）残留正是最常见的原因。
+# 现在端口由应用自己接管（manifest 里 checkport=false）：
+#   check_web_port_available —— 只判断，不动手，用于 start 开头的快速失败；
+#   free_web_port            —— 真正清理，只在确定要启动新实例前调用。
+web_port_owner_foreign(){
+  local pid exe
+  pid=$(port_listen_pid "$WEB_PORT")
+  [ -n "$pid" ] || return 1
+  pid_is_ours "$pid" && return 1
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+  log "port $WEB_PORT is held by pid $pid ($exe), not by ztmesh"
+  echo "端口 $WEB_PORT 被其他程序占用（pid $pid${exe:+：$exe}）。请先停用它，或改用其他端口。" >&2
+  return 0
+}
+
+check_web_port_available(){
+  ! web_port_owner_foreign
+}
+
+free_web_port(){
+  local pid cmd
+  pid=$(port_listen_pid "$WEB_PORT")
+  [ -n "$pid" ] || return 0
+  if pid_is_ours "$pid"; then
+    cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    log "port $WEB_PORT held by our own leftover process $pid ($cmd); killing it"
+    kill "$pid" 2>/dev/null
+    local i=0
+    while [ -d "/proc/$pid" ] && [ $i -lt 10 ]; do sleep 1; i=$((i+1)); done
+    [ -d "/proc/$pid" ] && kill -9 "$pid" 2>/dev/null
+    sleep 1
+    if [ -z "$(port_listen_pid "$WEB_PORT")" ]; then
+      log "port $WEB_PORT released"
+      return 0
+    fi
+  fi
+  # Anything left is not ours: report instead of killing someone else's service.
+  web_port_owner_foreign
+  return 1
+}
+
 start_web(){
   if web_is_running && web_healthy; then
     log "web server already running"
@@ -263,6 +367,7 @@ start_web(){
     echo "管理界面程序缺失或不可执行：$WEB_BIN" >&2
     return 1
   fi
+  free_web_port || return 1
   rm -f "$WEB_PIDFILE"
   TRIM_APPNAME="$APPNAME" TRIM_APPDEST="$APPDEST" TRIM_PKGVAR="$PKGVAR" \
   TRIM_PKGTMP="$PKGTMP" TRIM_PKGETC="$ETC" TRIM_SERVICE_PORT="$WEB_PORT" \
@@ -297,6 +402,18 @@ stop_web(){
     is_pid_alive "$pid" "$WEB_BIN" && kill -9 "$pid" 2>/dev/null
   fi
   rm -f "$WEB_PIDFILE" "${APPDEST}/app.sock"
+  # A stale instance that never made it into the pid file would keep the port
+  # busy and make the next start complain, so sweep it here too -- but give the
+  # process we just killed a moment to actually release the socket.
+  local i=0 holder
+  while [ $i -lt 3 ] && [ -n "$(port_listen_pid "$WEB_PORT")" ]; do sleep 1; i=$((i+1)); done
+  holder=$(port_listen_pid "$WEB_PORT")
+  if [ -n "$holder" ] && pid_is_ours "$holder"; then
+    log "stop: killing leftover listener $holder on port $WEB_PORT"
+    kill "$holder" 2>/dev/null
+    sleep 1
+    [ -d "/proc/$holder" ] && kill -9 "$holder" 2>/dev/null
+  fi
   log "web server stopped"
 }
 
@@ -806,6 +923,10 @@ start_all(){
   # A fresh start clears the "user stopped the daemon" intent, otherwise the
   # watchdog would keep honouring it after the app was started again.
   rm -f "$ZT_DISABLED_FLAG"
+  # Fail fast when the port belongs to another program: no point bringing the
+  # daemon up only to fail on the UI. Our own leftovers are handled by
+  # start_web, which knows whether it is going to reuse or replace them.
+  check_web_port_available || return 1
   start_zerotier || zr=1
   start_web || wr=1
   # "wait": at boot the tunnel device appears a few seconds after the daemon
