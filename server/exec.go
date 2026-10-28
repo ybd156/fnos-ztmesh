@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// timeoutContext is a tiny helper so call sites read as one line.
+func timeoutContext(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
+}
+
 /* runMain invokes the lifecycle script (cmd/main) and returns its exit code
  * plus combined output. The script owns everything that needs root shell:
  * iptables rules, the ZeroTier daemon and autostart registration.

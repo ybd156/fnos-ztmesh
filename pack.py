@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把 ./fpk 打包成 .fpk 安装包（纯 Python，不再依赖 fnpack.exe）。
+"""把 ./fpk 打包成 .fpk 安装包（纯 Python，不依赖 fnpack.exe）。
 
-为什么重写
-----------
-1. `fnpack.exe` 只能在 Windows 上跑，而且它写出来的 tar 成员权限全是 0666：
-   `cmd/*` 不可执行、`app/zt/zerotier-one` 不可执行，装到 fnOS 上守护进程根本起不来。
-   以前的做法是「先让 fnpack 打包，再把两层 tar 解包重写权限」，绕且脆。
-   现在直接用 Python 标准库 `tarfile` 生成两级归档，权限一次写对。
+为什么自己打
+------------
+1. `fnpack.exe` 只能在 Windows 上跑，而且早期版本写出来的 tar 成员权限全是 0666：
+   `cmd/*` 不可执行、`zt/zerotier-one` 不可执行，装到 fnOS 上守护进程根本起不来。
+   直接用标准库 `tarfile` 生成两级归档，权限一次写对。
 2. 后端已经从 Node 换成一个 Go 静态二进制（源码在 `server/`，包内路径
-   `app/bin/ztmesh-server`）。这里用 `go build` 交叉编译，产物写进临时目录，
+   `app/bin/ztmesh-server`）。这里用 `go build` 交叉编译，产物写进临时 staging，
    绝不在源码树里留下二进制。
 
 产物结构（与 fnOS 约定一致）
@@ -19,18 +18,29 @@
 内层 `app.tgz`：`app/` 目录树的 gzip'd tar（成员名相对 `app/`，即 `ui/config`、
       `www/index.html`、`zt/zerotier-one`、`bin/ztmesh-server`）。
 
-权限：目录 0755；`cmd/*`、`app/bin/ztmesh-server`、`app/zt/zerotier-one` 0755；其余 0644；
+单包多架构（all）
+-----------------
+`python pack.py`（默认）生成 `ztmesh-all.fpk`，manifest 写 `platform=all`，
+包内同时带两套二进制，安装时由 `cmd/install_callback` 按 `uname -m` 链接：
+
+    bin/ztmesh-server-amd64        zt/zerotier-one-x86_64
+    bin/ztmesh-server-arm64        zt/zerotier-one-aarch64
+
+也仍然可以只出单架构包（体积更小）：
+
+    python pack.py x86_64   ->  ztmesh-x86_64.fpk   （platform=x86）
+    python pack.py arm      ->  ztmesh-arm.fpk      （platform=arm）
+
+单架构包用不带后缀的名字（`bin/ztmesh-server`、`zt/zerotier-one`）。
+
+arm64 守护进程从哪来
+--------------------
+仓库里只放了 x86-64 版 `fpk/app/zt/zerotier-one`。arm 需要
+`dl/zerotier-one.arm64`，用 `python scripts/fetch_zerotier_arm.py` 从官方 deb
+里取一份（一次性，约 10MB，`dl/` 不进仓库）。
+
+权限：目录 0755；`cmd/*`、`bin/ztmesh-server*`、`zt/zerotier-one*` 0755；其余 0644；
       所有成员 uid/gid=0、属主 root。
-
-用法
-----
-    python pack.py            # 等价于 x86_64
-    python pack.py x86_64     # -> ztmesh-x86_64.fpk（GOOS=linux GOARCH=amd64）
-    python pack.py arm        # -> ztmesh-arm.fpk   （GOOS=linux GOARCH=arm64）
-
-找不到可用的 Go 工具链时，回退使用预置二进制
-`dl/ztmesh-server-<arch>`（`x86_64`/`arm` 或 `amd64`/`arm64` 两种命名都认）；
-两者都没有则中文报错并以退出码 2 结束。
 """
 import gzip
 import hashlib
@@ -58,9 +68,9 @@ SERVER_SRC = os.path.join(HERE, 'server')
 DL = os.path.join(HERE, 'dl')
 MANIFEST = os.path.join(SRC, 'manifest')
 
-#: 内置 ZeroTier 守护进程（源码树里恒为 x86-64 版本，arm 构建时临时替换）
-ZT_BIN = os.path.join(APPSRC, 'zt', 'zerotier-one')
-ARM_ZT_BIN = os.path.join(DL, 'zerotier-one.arm64')
+#: 源码树里恒为 x86-64 的守护进程；arm64 的从 dl/ 取
+ZT_CORE_X86 = os.path.join(APPSRC, 'zt', 'zerotier-one')
+ZT_CORE_ARM = os.path.join(DL, 'zerotier-one.arm64')
 
 #: 包内 Go 二进制路径（相对 app/）
 SERVER_REL = 'bin/ztmesh-server'
@@ -73,10 +83,15 @@ EXEC_MODE = 0o755
 SKIP_DIRS = {'__pycache__', '.git', '.idea', '.vscode'}
 SKIP_FILES = {'.DS_Store', 'Thumbs.db'}
 
-#: 平台 -> (GOARCH, manifest platform, ELF e_machine)
+#: 架构元组: (GOARCH, ELF e_machine, 包内后缀)
+ARCH_AMD64 = ('amd64', 62, 'x86_64')
+ARCH_ARM64 = ('arm64', 183, 'aarch64')
+
+#: 目标平台 -> (架构列表, manifest platform, 产物名)
 TARGETS = {
-    'x86_64': ('amd64', 'x86', 62),
-    'arm': ('arm64', 'arm', 183),
+    'all': ([ARCH_AMD64, ARCH_ARM64], 'all', 'ztmesh-all.fpk'),
+    'x86_64': ([ARCH_AMD64], 'x86', 'ztmesh-x86_64.fpk'),
+    'arm': ([ARCH_ARM64], 'arm', 'ztmesh-arm.fpk'),
 }
 
 #: fnOS 外层归档里必须存在的骨架目录/文件
@@ -92,13 +107,14 @@ REQUIRED_CMD = (
     'config_init', 'config_callback',
 )
 
-PLATFORM = (sys.argv[1] if len(sys.argv) > 1 else 'x86_64').strip()
+PLATFORM = (sys.argv[1] if len(sys.argv) > 1 else 'all').strip()
 if PLATFORM not in TARGETS:
-    sys.stderr.write('用法: python pack.py [x86_64|arm]\n')
+    sys.stderr.write('用法: python pack.py [all|x86_64|arm]\n')
     sys.exit(2)
 
-GOARCH, MANIFEST_PLATFORM, ELF_MACHINE = TARGETS[PLATFORM]
-FPK = os.path.join(HERE, 'ztmesh-%s.fpk' % PLATFORM)
+ARCHES, MANIFEST_PLATFORM, FPK_NAME = TARGETS[PLATFORM]
+FPK = os.path.join(HERE, FPK_NAME)
+MULTI_ARCH = len(ARCHES) > 1
 
 
 # ---------------------------------------------------------------------------
@@ -158,38 +174,24 @@ def read_manifest():
         return fh.read().decode('utf-8', 'replace')
 
 
-def write_manifest(text):
-    with open(MANIFEST, 'wb') as fh:
-        fh.write(text.encode('utf-8'))
-
-
-def set_manifest_platform(plat):
-    """把 fpk/manifest 的 platform 改成目标架构（构建结束后还原为 x86）。"""
-    text = read_manifest()
-    if PLATFORM_RE.search(text):
-        text = PLATFORM_RE.sub(lambda m: m.group(1) + plat, text, count=1)
-    else:
-        if not text.endswith('\n'):
-            text += '\n'
-        text += 'platform=%s\n' % plat
-    write_manifest(text)
-
-
 def manifest_version():
     """读取 fpk/manifest 的 version，注入 Go 二进制的 -X main.version。"""
-    m = re.search(r'^[ 	]*version[ 	]*=[ 	]*(\S+)', read_manifest(), re.M)
+    m = re.search(r'^[ \t]*version[ \t]*=[ \t]*(\S+)', read_manifest(), re.M)
     return m.group(1) if m else '0.0.0'
 
 
-def manifest_payload(digest):
-    """返回要写进包里的 manifest 字节：platform=目标架构、checksum=md5(app.tgz)。"""
+def manifest_payload(digest, platform):
+    """返回要写进包里的 manifest 字节：platform=目标架构、checksum=md5(app.tgz)。
+
+    源码树里的 fpk/manifest 不会被改写（它始终保持 platform=all 的 canonical 状态）。
+    """
     text = read_manifest()
     if PLATFORM_RE.search(text):
-        text = PLATFORM_RE.sub(lambda m: m.group(1) + MANIFEST_PLATFORM, text, count=1)
+        text = PLATFORM_RE.sub(lambda m: m.group(1) + platform, text, count=1)
     else:
         if not text.endswith('\n'):
             text += '\n'
-        text += 'platform=%s\n' % MANIFEST_PLATFORM
+        text += 'platform=%s\n' % platform
 
     if CHECKSUM_RE.search(text):
         text = CHECKSUM_RE.sub(lambda m: m.group(1) + digest, text, count=1)
@@ -227,13 +229,13 @@ def find_go():
     return None
 
 
-def go_build(go, out_path):
+def go_build(go, out_path, goarch):
     """交叉编译 Go 服务端到 out_path。"""
     if not os.path.isdir(SERVER_SRC):
         fail('找不到 Go 源码目录 server/（%s）' % SERVER_SRC, 2)
     env = os.environ.copy()
     env['GOOS'] = 'linux'
-    env['GOARCH'] = GOARCH
+    env['GOARCH'] = goarch
     env['CGO_ENABLED'] = '0'
     # 离线环境：不允许 go 为了满足 go.mod 去下载新工具链
     env.setdefault('GOTOOLCHAIN', 'local')
@@ -247,11 +249,11 @@ def go_build(go, out_path):
             os.makedirs(env[key], exist_ok=True)
         except OSError as exc:
             fail('无法创建 %s 目录 %s: %s' % (key, env[key], exc))
-    # 版本号只写在 manifest 一处：这里把它注入二进制，避免后端自报的版本与包版本不一致。
+    # 版本号只在 manifest 维护一处：注入二进制，避免后端自报版本与包版本不一致
     ldflags = '-s -w -X main.version=%s' % manifest_version()
     cmd = [go, 'build', '-trimpath', '-buildvcs=false',
            '-ldflags', ldflags, '-o', out_path, '.']
-    say('>> 交叉编译服务端: GOOS=linux GOARCH=%s CGO_ENABLED=0' % GOARCH)
+    say('>> 交叉编译服务端: GOOS=linux GOARCH=%s CGO_ENABLED=0' % goarch)
     proc = subprocess.run(cmd, cwd=SERVER_SRC, env=env, capture_output=True)
     out = (proc.stdout or b'').decode('utf-8', 'replace').strip()
     err = (proc.stderr or b'').decode('utf-8', 'replace').strip()
@@ -267,45 +269,39 @@ def go_build(go, out_path):
         fail('go build 未产出 %s' % out_path)
 
 
-def fallback_binary():
+def fallback_binary(goarch):
     """go 不可用时的预置二进制：dl/ztmesh-server-<arch>。"""
-    for arch in (PLATFORM, GOARCH):
+    for arch in (goarch, 'x86_64' if goarch == 'amd64' else 'arm'):
         cand = os.path.join(DL, 'ztmesh-server-%s' % arch)
         if os.path.exists(cand):
             return cand
     return None
 
 
-def stage_server_binary(staging_dir):
-    """把 ztmesh-server 放到临时 staging 的 app/bin/ 下，返回其路径。"""
-    bin_dir = os.path.join(staging_dir, 'app', 'bin')
-    os.makedirs(bin_dir, exist_ok=True)
-    out = os.path.join(bin_dir, 'ztmesh-server')
-
+def build_server_binary(out_path, goarch, machine):
+    """产出并校验一个 Go 二进制。"""
     go = find_go()
     if go:
-        go_build(go, out)
-        say('>> 编译完成: %s (%d 字节)' % (SERVER_REL, os.path.getsize(out)))
+        go_build(go, out_path, goarch)
+        say('>> 编译完成: %s (%d 字节)' % (os.path.basename(out_path), os.path.getsize(out_path)))
     else:
-        pre = fallback_binary()
+        pre = fallback_binary(goarch)
         if not pre:
             fail('未找到可用的 Go 工具链，也没有预置二进制 dl/ztmesh-server-%s。\n'
-                 '       请安装 Go 1.21+（或把 go 放到 tools/go/bin/），'
-                 '或放置预编译的 dl/ztmesh-server-%s / dl/ztmesh-server-%s。'
-                 % (PLATFORM, PLATFORM, GOARCH), 2)
-        shutil.copy2(pre, out)
+                 '       请安装 Go 1.21+（或把 go 放到 tools/go/bin/）。' % goarch, 2)
+        shutil.copy2(pre, out_path)
         say('>> Go 不可用，回退使用预置二进制: %s' % pre)
 
-    with open(out, 'rb') as fh:
-        head = fh.read(20)
-    machine = elf_machine(head)
-    if machine is None:
-        fail('%s 不是 ELF 可执行文件（期望 linux/%s 静态二进制）' % (SERVER_REL, GOARCH))
-    if machine != ELF_MACHINE:
+    with open(out_path, 'rb') as fh:
+        got = elf_machine(fh.read(20))
+    if got is None:
+        fail('%s 不是 ELF 可执行文件（期望 linux/%s 静态二进制）'
+             % (os.path.basename(out_path), goarch))
+    if got != machine:
         fail('%s 架构不匹配：e_machine=%d，期望 %d（%s）'
-             % (SERVER_REL, machine, ELF_MACHINE, PLATFORM))
-    say('>> 架构校验通过: %s e_machine=%d (%s)' % (SERVER_REL, machine, PLATFORM))
-    return out
+             % (os.path.basename(out_path), got, machine, goarch))
+    say('>> 架构校验通过: %s e_machine=%d (%s)'
+        % (os.path.basename(out_path), got, goarch))
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +314,28 @@ def member_mode(arcname, is_dir):
     name = arcname.rstrip('/')
     if name.startswith('cmd/'):
         return EXEC_MODE
-    if name in (SERVER_REL, 'zt/zerotier-one'):
+    base = name.rsplit('/', 1)[-1]
+    if base.startswith('ztmesh-server') or base.startswith('zerotier-one'):
         return EXEC_MODE
     return FILE_MODE
+
+
+def normalize_payload(payload):
+    """文本成员统一成 LF。
+
+    为什么必须在打包时做：在 Windows 上编辑过的 `cmd/main` 会带 CRLF，写进包后
+    Linux 上 shebang 变成 `#!/bin/bash^M`，直接报
+    "bad interpreter: No such file or directory"，整个应用起不来。
+    二进制（ELF/PNG）里含 NUL 字节，据此区分，不会被误伤。
+    """
+    if b"\x00" in payload[:4096]:
+        return payload
+    return payload.replace(b"\r\n", b"\n")
+
+
+def read_member(path):
+    with open(path, 'rb') as fh:
+        return normalize_payload(fh.read())
 
 
 def add_bytes(tar, arcname, payload, mode, mtime):
@@ -370,46 +385,86 @@ def close_gz_sink(tar, gz, raw, close_raw):
         raw.close()
 
 
-def collect_app_tree(staged_bin):
-    """收集 app/ 树的归档成员：[(arcname, is_dir, path or bytes)]。"""
-    entries = []
+def stage_app_tree(staging, goarch_pairs):
+    """把 app/ 树复制到 staging，并按目标架构放入二进制。
+
+    goarch_pairs: [(goarch, machine, tag)]；单架构时用不带后缀的名字。
+    返回 staging/app 路径。
+    """
+    app_root = os.path.join(staging, 'app')
     if not os.path.isdir(APPSRC):
         fail('找不到应用目录 fpk/app（%s）' % APPSRC)
-    for root, dirs, files in os.walk(APPSRC):
-        # 源码树里的 app/bin 是构建残留，一律忽略，二进制从 staging 注入
-        if os.path.abspath(root) == os.path.abspath(APPSRC):
-            dirs[:] = [d for d in dirs if d != 'bin']
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-        rel_root = os.path.relpath(root, APPSRC).replace(os.sep, '/')
-        if rel_root == '.':
-            rel_root = ''
-        if rel_root:
-            entries.append((rel_root + '/', True, None))
-        for name in sorted(files):
-            if name in SKIP_FILES:
-                continue
-            rel = (rel_root + '/' + name) if rel_root else name
-            entries.append((rel, False, os.path.join(root, name)))
 
-    # 注入 Go 服务端二进制
-    entries.append(('bin/', True, None))
-    entries.append((SERVER_REL, False, staged_bin))
-    return entries
+    # 复制除 bin/ 与守护进程之外的整棵树（守护进程按架构单独放）
+    def ignore(dirpath, names):
+        skipped = set()
+        for name in names:
+            if name in SKIP_DIRS or name in SKIP_FILES:
+                skipped.add(name)
+        if os.path.abspath(dirpath) == os.path.abspath(APPSRC):
+            if 'bin' in names:
+                skipped.add('bin')
+        if os.path.abspath(dirpath) == os.path.abspath(os.path.join(APPSRC, 'zt')):
+            for name in names:
+                if name.startswith('zerotier-one'):
+                    skipped.add(name)
+        return skipped
+
+    shutil.copytree(APPSRC, app_root, ignore=ignore)
+    bin_dir = os.path.join(app_root, 'bin')
+    zt_dir = os.path.join(app_root, 'zt')
+    os.makedirs(bin_dir, exist_ok=True)
+    os.makedirs(zt_dir, exist_ok=True)
+
+    for goarch, machine, tag in goarch_pairs:
+        suffix = '' if not MULTI_ARCH else '-' + goarch
+        server_out = os.path.join(bin_dir, 'ztmesh-server' + suffix)
+        build_server_binary(server_out, goarch, machine)
+
+        core_src = ZT_CORE_X86 if goarch == 'amd64' else ZT_CORE_ARM
+        if not os.path.exists(core_src):
+            if goarch == 'arm64':
+                fail('未找到 arm64 版 ZeroTier 守护进程 %s。\n'
+                     '       先执行 python scripts/fetch_zerotier_arm.py'
+                     % rel_to_here(core_src), 2)
+            fail('未找到 ZeroTier 守护进程 %s' % rel_to_here(core_src), 2)
+        with open(core_src, 'rb') as fh:
+            got = elf_machine(fh.read(20))
+        if got != machine:
+            fail('%s 架构不匹配（e_machine=%s，期望 %d）'
+                 % (rel_to_here(core_src), got, machine))
+        core_suffix = '' if not MULTI_ARCH else '-' + tag
+        shutil.copy2(core_src, os.path.join(zt_dir, 'zerotier-one' + core_suffix))
+        say('>> 放入守护进程: zt/zerotier-one%s (%s, e_machine=%d)'
+            % (core_suffix, tag, got))
+
+    return app_root
 
 
-def build_app_tgz(staged_bin, mtime):
-    """生成 app.tgz 字节。"""
-    entries = collect_app_tree(staged_bin)
+def build_app_tgz(app_root, mtime):
+    """把 staging 里的 app/ 树打成 app.tgz 字节。"""
     buf = io.BytesIO()
     tar, gz, raw, close_raw = open_gz_sink(buf, mtime)
     try:
+        entries = []
+        for root, dirs, files in os.walk(app_root):
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+            rel_root = os.path.relpath(root, app_root).replace(os.sep, '/')
+            if rel_root == '.':
+                rel_root = ''
+            if rel_root:
+                entries.append((rel_root + '/', True, None))
+            for name in sorted(files):
+                if name in SKIP_FILES:
+                    continue
+                rel = (rel_root + '/' + name) if rel_root else name
+                entries.append((rel, False, os.path.join(root, name)))
+
         for arcname, is_dir, path in entries:
             if is_dir:
                 add_dir(tar, arcname, mtime)
                 continue
-            with open(path, 'rb') as fh:
-                payload = fh.read()
-            add_bytes(tar, arcname, payload, member_mode(arcname, False), mtime)
+            add_bytes(tar, arcname, read_member(path), member_mode(arcname, False), mtime)
     finally:
         close_gz_sink(tar, gz, raw, close_raw)
     return buf.getvalue()
@@ -444,51 +499,23 @@ def verify_skeleton():
             fail('缺少生命周期脚本 fpk/cmd/%s' % name)
     if not os.path.exists(MANIFEST):
         fail('缺少 fpk/manifest')
-    if not os.path.exists(ZT_BIN):
+    if not os.path.exists(ZT_CORE_X86):
         fail('缺少 ZeroTier 守护进程 fpk/app/zt/zerotier-one')
-    # 2.0 之后后端是 Go 二进制，旧的 Node 后端目录不应再进包
     legacy = os.path.join(APPSRC, 'server')
     if os.path.isdir(legacy):
         say('>> 警告: 检测到遗留的 Node 后端目录 fpk/app/server/，它会被一起打进包；'
             '2.0 起应已删除')
 
 
-def swap_arm_zerotier():
-    """arm 构建：若 dl/zerotier-one.arm64 存在则替换，返回还原函数。"""
-    if PLATFORM != 'arm':
-        return lambda: None
-    if not os.path.exists(ARM_ZT_BIN):
-        fail('未找到 arm64 版 ZeroTier 守护进程 %s。\n'
-             '       请下载 zerotier-one_*_arm64.deb 并把 usr/sbin/zerotier-one 解出为 dl/zerotier-one.arm64；'
-             '否则 arm 包里会混进 x86-64 版守护进程，装上跑不起来。'
-             % rel_to_here(ARM_ZT_BIN), 2)
+# ---------------------------------------------------------------------------
+# 组装
+# ---------------------------------------------------------------------------
 
-    with open(ARM_ZT_BIN, 'rb') as fh:
-        arm_machine = elf_machine(fh.read(20))
-    if arm_machine != ELF_MACHINE:
-        fail('%s 不是 arm64 可执行文件（e_machine=%s，期望 %d）'
-             % (rel_to_here(ARM_ZT_BIN), arm_machine, ELF_MACHINE))
-
-    backup = os.path.join(DL, 'zerotier-one.x86-backup')
-    shutil.copy2(ZT_BIN, backup)
-    shutil.copy2(ARM_ZT_BIN, ZT_BIN)
-    say('>> arm 构建: 已用 dl/zerotier-one.arm64 替换 zt/zerotier-one')
-
-    def restore():
-        if os.path.exists(backup):
-            shutil.copy2(backup, ZT_BIN)
-            os.remove(backup)
-            say('>> 已还原源码树中的 x86-64 版 zt/zerotier-one')
-
-    return restore
-
-
-def build_fpk(staged_bin, mtime):
-    app_tgz = build_app_tgz(staged_bin, mtime)
+def build_fpk(app_tgz, mtime):
     digest = md5_hex(app_tgz)
     say('>> app.tgz 已生成: %d 字节, md5=%s' % (len(app_tgz), digest))
 
-    manifest_bytes = manifest_payload(digest)
+    manifest_bytes = normalize_payload(manifest_payload(digest, MANIFEST_PLATFORM))
     outer = collect_outer()
 
     tmp_out = FPK + '.tmp'
@@ -501,9 +528,7 @@ def build_fpk(staged_bin, mtime):
                 if is_dir:
                     add_dir(tar, arcname, mtime)
                     continue
-                with open(path, 'rb') as fh:
-                    payload = fh.read()
-                add_bytes(tar, arcname, payload, member_mode(arcname, False), mtime)
+                add_bytes(tar, arcname, read_member(path), member_mode(arcname, False), mtime)
         finally:
             close_gz_sink(tar, gz, raw, close_raw)
 
@@ -511,18 +536,17 @@ def build_fpk(staged_bin, mtime):
             os.remove(FPK)
         os.replace(tmp_out, FPK)
     except BaseException:
-        # 失败时不留半成品
         if os.path.exists(tmp_out):
             try:
                 os.remove(tmp_out)
             except OSError:
                 pass
         raise
-    return app_tgz, digest
+    return digest
 
 
 def self_check(app_tgz, digest):
-    """重新打开产物，核对结构、权限与 checksum。"""
+    """重新打开产物，核对结构、权限、checksum 与两个二进制的架构。"""
     with tarfile.open(FPK, 'r:gz') as t:
         names = [m.name for m in t.getmembers()]
         for required in ('manifest', 'app.tgz'):
@@ -540,6 +564,13 @@ def self_check(app_tgz, digest):
             declared = found.group(0).split('=', 1)[1].strip()
         if declared != digest:
             fail('manifest.checksum=%s 与 md5(app.tgz)=%s 不一致' % (declared, digest))
+
+        # 生命周期脚本必须是 LF：CRLF 会让 shebang 失效
+        for m in t.getmembers():
+            if m.isdir() or not (m.name.startswith('cmd/') or m.name == 'manifest'):
+                continue
+            if bytes([13]) in t.extractfile(m).read():
+                fail('%s 里含 CR（CRLF），Linux 上 shebang 会失效' % m.name)
 
         bad = []
         for m in t.getmembers():
@@ -567,24 +598,31 @@ def self_check(app_tgz, digest):
                 say('  %s %9d %s' % (oct(m.mode), m.size, m.name))
             if inner_bad:
                 fail('app.tgz 权限异常: ' + '; '.join(inner_bad[:8]))
-            if SERVER_REL not in [m.name for m in a.getmembers()]:
-                fail('app.tgz 缺少 %s' % SERVER_REL)
-            # 两个二进制都必须是目标架构（防止 arm 包混进 x86 守护进程）
-            for name in (SERVER_REL, 'zt/zerotier-one'):
-                member = a.getmember(name)
-                machine = elf_machine(a.extractfile(member).read(20))
-                if machine != ELF_MACHINE:
-                    fail('app.tgz 里 %s 架构不匹配：e_machine=%s，期望 %d（%s）'
-                         % (name, machine, ELF_MACHINE, PLATFORM))
-                say('>> 架构校验通过: %s e_machine=%d' % (name, machine))
+
+            inner_names = [m.name for m in a.getmembers()]
+            for goarch, machine, tag in ARCHES:
+                if MULTI_ARCH:
+                    server_rel = '%s-%s' % (SERVER_REL, goarch)
+                    core_rel = 'zt/zerotier-one-%s' % tag
+                else:
+                    server_rel = SERVER_REL
+                    core_rel = 'zt/zerotier-one'
+                for rel in (server_rel, core_rel):
+                    if rel not in inner_names:
+                        fail('app.tgz 缺少 %s' % rel)
+                    got = elf_machine(a.extractfile(a.getmember(rel)).read(20))
+                    if got != machine:
+                        fail('app.tgz 里 %s 架构不匹配：e_machine=%s，期望 %d（%s）'
+                             % (rel, got, machine, goarch))
+                    say('>> 架构校验通过: %s e_machine=%d (%s)' % (rel, got, goarch))
 
     say('')
     say('>> 校验通过: manifest.checksum == md5(app.tgz) == %s' % digest)
 
 
 def main():
-    say('>> 目标平台: %s (linux/%s, manifest platform=%s)'
-        % (PLATFORM, GOARCH, MANIFEST_PLATFORM))
+    say('>> 目标平台: %s (manifest platform=%s, 架构: %s)'
+        % (PLATFORM, MANIFEST_PLATFORM, ', '.join(a[0] for a in ARCHES)))
     verify_skeleton()
 
     mtime = build_timestamp()
@@ -593,24 +631,14 @@ def main():
     build_home = os.path.join(HERE, '.gobuild')
     os.makedirs(build_home, exist_ok=True)
     staging = tempfile.mkdtemp(prefix='staging-', dir=build_home)
-    restore_zt = lambda: None
     try:
-        staged_bin = stage_server_binary(staging)
-        restore_zt = swap_arm_zerotier()
-        set_manifest_platform(MANIFEST_PLATFORM)
-        app_tgz, digest = build_fpk(staged_bin, mtime)
+        app_root = stage_app_tree(staging, ARCHES)
+        app_tgz = build_app_tgz(app_root, mtime)
+        digest = build_fpk(app_tgz, mtime)
         self_check(app_tgz, digest)
         say('>> 完成: %s (%d 字节)' % (os.path.basename(FPK), os.path.getsize(FPK)))
     finally:
-        try:
-            restore_zt()
-        finally:
-            # 源码树保持 canonical：manifest 还原为 platform=x86
-            try:
-                set_manifest_platform('x86')
-            except Exception as exc:  # pragma: no cover - 还原失败要显眼
-                sys.stderr.write('警告: 还原 fpk/manifest 失败: %s\n' % exc)
-            shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 if __name__ == '__main__':

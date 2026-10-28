@@ -31,7 +31,42 @@ MAIN="$(find_main)" || MAIN=""
 APPROOT="${MAIN%/cmd/main}"
 [ -n "$APPROOT" ] || APPROOT="$(dirname "$APPDEST")"
 
-# --- 1. executable bits ---------------------------------------------------
+# --- 1. architecture-specific binaries ------------------------------------
+# The "all" package ships both architectures with name suffixes; the per-arch
+# packages ship the plain names. Resolve the pair this device needs once, here,
+# so cmd/main and the backend only ever deal with the plain paths.
+case "$(uname -m)" in
+  x86_64|amd64)  GO_TAG="amd64"; ZT_TAG="x86_64" ;;
+  aarch64|arm64) GO_TAG="arm64"; ZT_TAG="aarch64" ;;
+  *)
+    log "ERROR: unsupported architecture $(uname -m)"
+    echo "此安装包仅支持 x86-64 或 arm64 架构，当前设备为 $(uname -m)。"
+    exit 1
+    ;;
+esac
+
+# link_arch_binary <plain path> <arch tag> <label>
+link_arch_binary(){
+  local plain="$1" tag="$2" label="$3"
+  if [ -f "${plain}-${tag}" ]; then
+    # 多架构包：用相对软链接指向本机架构的那份，避免复制出第二份 10MB
+    rm -f "$plain" 2>/dev/null
+    if ln -sf "$(basename "${plain}-${tag}")" "$plain" 2>>"$LOG"; then
+      log "$label: linked $plain -> $(basename "${plain}-${tag}")"
+    else
+      cp -f "${plain}-${tag}" "$plain" 2>>"$LOG" && log "$label: copied ${plain}-${tag}"
+    fi
+    chmod 0755 "${plain}-${tag}" 2>>"$LOG"
+  elif [ -f "$plain" ]; then
+    log "$label: using $plain (single-arch package)"
+  else
+    log "WARNING: $label binary not found ($plain or ${plain}-${tag})"
+  fi
+}
+
+link_arch_binary "$APPDEST/bin/ztmesh-server" "$GO_TAG" "backend"
+link_arch_binary "$APPDEST/zt/zerotier-one" "$ZT_TAG" "zerotier-one"
+
 # fpk archives do not reliably carry POSIX mode bits, so set them explicitly.
 # The Go backend and the ZeroTier daemon are both useless without +x.
 chmod 0755 "$APPDEST/zt/zerotier-one" 2>>"$LOG" || log "chmod zerotier-one failed"

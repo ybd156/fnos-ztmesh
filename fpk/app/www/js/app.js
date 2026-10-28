@@ -700,6 +700,84 @@ async function setAutostart(enabled, btn) {
   }
 }
 
+/* ---------- ZeroTier 核心升级 ---------- */
+/* 官方源下载 → 校验 ELF 架构 → 停守护进程 → 替换 → 重启。
+ * 后端把下载/解包/校验都做完才动二进制，失败会自动回滚，界面只如实展示每一步。 */
+let coreState = null;
+
+function renderCore(st) {
+  coreState = st || null;
+  const badge = $('#coreBadge');
+  const info = $('#coreInfo');
+  const upBtn = $('#btnCoreUpdate');
+  const rbBtn = $('#btnCoreRollback');
+  if (!st) {
+    if (badge) { badge.textContent = '未知'; badge.className = 'net-status offline'; }
+    return;
+  }
+  const hasNew = !!st.updateAvailable;
+  if (badge) {
+    badge.textContent = hasNew ? '有新版本' : (st.latest ? '已是最新' : '未检查');
+    badge.className = 'net-status ' + (hasNew ? 'pending' : (st.latest ? 'ok' : 'offline'));
+  }
+  if (info) {
+    const rows = [];
+    rows.push(subnetRow('当前核心', st.current || '未知', null));
+    rows.push(subnetRow('最新版本', st.latest || (st.updateable ? '未知' : '无法检查'), null));
+    rows.push(subnetRow('本机架构', st.arch || '未知', null));
+    rows.push(subnetRow('核心来源', st.managed ? '界面升级安装（$TRIM_PKGVAR/zt-bin）' : '应用包内置', null));
+    rows.push(subnetRow('可回滚', st.rollbackReady ? '是' : '否（未通过界面升级过）', st.rollbackReady));
+    if (Array.isArray(st.notes) && st.notes.length) {
+      st.notes.forEach((n) => rows.push(subnetRow('说明', n, null)));
+    }
+    info.innerHTML = rows.join('');
+  }
+  if (upBtn) upBtn.disabled = !hasNew;
+  if (rbBtn) rbBtn.disabled = !st.rollbackReady;
+}
+
+async function loadCore() {
+  try {
+    renderCore(await api('/core'));
+  } catch (e) {
+    const badge = $('#coreBadge');
+    if (badge) { badge.textContent = '读取失败'; badge.className = 'net-status denied'; }
+    const info = $('#coreInfo');
+    if (info) info.textContent = '读取核心信息失败：' + e.message;
+  }
+}
+
+function showCoreLog(payload) {
+  const el = $('#coreLog');
+  const lines = [];
+  if (payload && payload.error) lines.push('错误：' + payload.error);
+  if (payload && payload.detail) lines.push(payload.detail);
+  if (payload && Array.isArray(payload.notes)) payload.notes.forEach((n) => lines.push('· ' + n));
+  if (payload && payload.after) lines.push('当前版本：' + payload.after);
+  if (!lines.length) lines.push('完成。');
+  el.textContent = lines.join('\n');
+  el.classList.toggle('bad', !!(payload && (payload.error || payload.ok === false)));
+}
+
+async function coreAction(btn, busyText, path, body) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = busyText;
+  $('#coreLog').textContent = busyText + '…（下载与校验可能要一两分钟，请勿关闭页面）';
+  try {
+    const r = await api(path, 'POST', body || {});
+    showCoreLog(r);
+    toast(r && r.ok ? '操作完成' : '操作未完全成功，请看下方日志', r && r.ok ? 'ok' : 'error');
+  } catch (e) {
+    toast('操作失败：' + e.message, 'error');
+    showCoreLog(e.data || { error: e.message });
+  } finally {
+    btn.textContent = label;
+    await loadCore();
+    await loadStatus();
+  }
+}
+
 /* ---------- helpers ---------- */
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -724,6 +802,15 @@ $('#btnCopyAddress').addEventListener('click', async () => {
 });
 $('#btnStart').addEventListener('click', svcStart);
 $('#btnStop').addEventListener('click', svcStop);
+
+/* core update controls */
+$('#btnCoreCheck').addEventListener('click', busyButton($('#btnCoreCheck'), '检查中…', async () => {
+  await loadCore();
+  const st = coreState;
+  toast(st && st.updateAvailable ? ('发现新版本 ' + st.latest) : '核心已是最新');
+}));
+$('#btnCoreUpdate').addEventListener('click', () => coreAction($('#btnCoreUpdate'), '升级中…', '/core/update'));
+$('#btnCoreRollback').addEventListener('click', () => coreAction($('#btnCoreRollback'), '回滚中…', '/core/rollback'));
 
 /* autostart controls */
 $('#btnAutostartOn').addEventListener('click', () => setAutostart(true, $('#btnAutostartOn')));
@@ -778,6 +865,7 @@ function refresh() {
   if (view === 'overview') {
     loadNetStats();
     loadAutostart();
+    loadCore();
   } else if (view === 'networks') {
     loadNetworks();
   } else if (view === 'peers') {
@@ -789,4 +877,5 @@ function refresh() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
 refresh();
+loadCore();
 setInterval(refresh, 8000);

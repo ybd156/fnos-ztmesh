@@ -303,6 +303,18 @@ func route(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		handleAutostart(w, r)
+	case p == "/api/core":
+		handleCore(w, r)
+	case p == "/api/core/update":
+		if !requireTrusted(w, r) {
+			return
+		}
+		handleCoreUpdate(w, r)
+	case p == "/api/core/rollback":
+		if !requireTrusted(w, r) {
+			return
+		}
+		handleCoreRollback(w, r)
 	case strings.HasPrefix(p, "/api/"), p == "/api":
 		proxyZeroTier(w, r, p)
 	default:

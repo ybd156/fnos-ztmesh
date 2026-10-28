@@ -3,16 +3,17 @@
 
 ## 安装
 
-1. 飞牛 → **应用中心 → 手动安装**，按你的 NAS 架构选择对应安装包：
-   - `ztmesh-x86_64.fpk`（x86-64 / Intel / AMD）
-   - `ztmesh-arm.fpk`（arm64 / aarch64）
+1. 飞牛 → **应用中心 → 手动安装**，选择 **`ztmesh-all.fpk`**（一个包同时支持 x86-64 与 arm64）。
 2. 安装向导中可填写要加入的 **16 位网络 ID**（可留空，之后在界面里加也行）。
 3. 安装完成后 ZeroTier 服务会自动启动。若填了网络 ID，会在首次启动时自动加入。
 4. 从**应用中心**打开「ZeroTier异地组网-虚拟局域网」卡片进入管理界面。
 
-> 本应用**无需任何外部运行时**：管理后端已重构为 Go 单静态二进制（`bin/ztmesh-server`），
-> 不再需要 Node 运行时，安装时也不会额外拉取任何依赖应用。
-> `install_init` 会在安装前检测 `uname -m`，非对应架构设备会给出中文报错并中止。
+> 本应用**无需任何外部运行时**：管理后端是 Go 静态二进制，安装时不会拉取任何依赖应用。
+> 单包里带了两套二进制，`install_callback` 按 `uname -m` 把本机架构的那份软链接成
+> `bin/ztmesh-server` 与 `zt/zerotier-one`；`install_init` 会在安装前校验架构。
+> 需要更小的单架构包时，可自行构建 `ztmesh-x86_64.fpk` / `ztmesh-arm.fpk`（见「从源码构建」）。
+
+> 维护者：<https://github.com/ybd156> ｜ 发布者：<https://github.com/ybd156/fnos-ztmesh>
 
 ### 管理界面入口与端口
 
@@ -66,6 +67,26 @@
 整个应用的启停由飞牛应用中心负责（`ctl_stop=true`）。
 
 **默认路由** 开启后所有流量走 ZeroTier；**网络 DNS** 用于让网络下发的 DNS 生效——异地组网、内网穿透、访问 NAS 内网服务时会用到这两个。
+
+## 在界面里升级 ZeroTier 核心
+
+概览页的「ZeroTier 核心」卡片可以直接把内置守护进程换成官方新版本，不必等应用包更新。
+
+1. 点 **检查更新**：后端读本机守护进程自报的版本（`GET /status`），再去 ZeroTier 官方仓库
+   取最新版本号（`api.github.com/repos/zerotier/ZeroTierOne/releases/latest`）。
+2. 点 **升级核心**：后端按本机架构下载官方 `.deb`（`download.zerotier.com`），
+   在 Go 里解析 ar 容器、用系统 `tar` 解出 `usr/sbin/zerotier-one`，
+   校验 ELF 架构后停守护进程 → 原子替换 → 重启，并把**旧核心留作回滚点**。
+3. 新版有问题时点 **回滚**：恢复上一个核心并重启，隧道配置（子网路由）会自动重新下发。
+
+几个约束：
+
+- 升级后的核心放在 `$TRIM_PKGVAR/zt-bin/`，**不在应用目录里**，所以重装/升级应用不会把它覆盖；
+  `cmd/main` 优先使用它，找不到才回落到包内 `zt/zerotier-one`。
+- 只接受官方 `.deb`，且**架构必须与本机一致**（e_machine 校验），不接受任意 URL。
+- 升级过程会短暂中断隧道（几秒）；已加入的网络和节点身份不受影响（`$TRIM_PKGVAR/zt` 不动）。
+- 下载源不可达时（内网/无外网），卡片会显示具体错误；此时只能等应用包更新，或手动替换
+  `$TRIM_PKGVAR/zt-bin/zerotier-one` 后重启应用。
 
 ## 开机自启与看门狗
 
@@ -193,6 +214,7 @@ ZeroTier 默认只能访问**装了 ZeroTier 的设备本身**。打开这个功
 | 应用版本 | `$TRIM_PKGVAR/VERSION` |
 | 运行 pid / 端口文件、日志 | `$TRIM_PKGTMP` |
 | 程序与 Web 界面 | `$TRIM_APPDEST`（= `/vol{n}/@appcenter/ztmesh`），后端二进制为 `$TRIM_APPDEST/bin/ztmesh-server` |
+| 界面内升级的 ZeroTier 核心 | `$TRIM_PKGVAR/zt-bin/zerotier-one`（旧版本留在 `zerotier-one.prev`） |
 
 `authtoken.secret` 只保存在后端，Web 界面通过后端（Go 服务）代理访问 ZeroTier API，**令牌不会下发到浏览器**；
 Central API Token 也只在可信入口按需下发一次（见上文）。
@@ -201,56 +223,48 @@ Central API Token 也只在可信入口按需下发一次（见上文）。
 
 ## 从源码构建
 
-需要 **Go 1.21+**（本仓库在 `tools/go/bin/go` 放了 Windows 版工具链时可直接用）与 **Python 3.8+**。
-管理后端的 Go 源码在 `server/`，打包脚本不再调用 `fnpack.exe`，纯 Python 直接生成 `.fpk`。
+需要 **Go 1.21+** 与 **Python 3.8+**（校验脚本可选 Node）。
+管理后端源码在 `server/`，打包脚本不调用 `fnpack.exe`，纯 Python 直接生成 `.fpk`。
 
 ```bash
-# x86-64 安装包 -> ztmesh-x86_64.fpk
-python pack.py x86_64
-
-# arm64 安装包 -> ztmesh-arm.fpk
-#   仓库里只放了 x86-64 版守护进程，arm 构建前先取一份 arm64 的（一次性，约 10MB）
-python scripts/fetch_zerotier_arm.py
-python pack.py arm
-
-# 不带参数等价于 x86_64
+# 默认：单包多架构 -> ztmesh-all.fpk（manifest platform=all，含两套二进制）
 python pack.py
+
+# 只出单架构包（体积更小）
+python pack.py x86_64     # -> ztmesh-x86_64.fpk（platform=x86）
+python pack.py arm        # -> ztmesh-arm.fpk   （platform=arm）
 ```
 
-`scripts/fetch_zerotier_arm.py` 直接下载官方 `zerotier-one_<版本>_arm64.deb`，用标准库
-（`tarfile` + `lzma`）解出 `usr/sbin/zerotier-one` 写到 `dl/zerotier-one.arm64`，
+多架构包需要 arm64 版守护进程（仓库里只放了 x86-64 的）：
+
+```bash
+python scripts/fetch_zerotier_arm.py   # 从官方 deb 取出 dl/zerotier-one.arm64（一次性，约 10MB）
+```
+
+`scripts/fetch_zerotier_arm.py` 用标准库（`tarfile` + `lzma`）解出 `usr/sbin/zerotier-one`，
 不依赖 `dpkg-deb`/`ar`/`xz`，Windows 上也能跑。
 
 构建过程：
 
-1. 交叉编译 `server/` → 临时目录中的 `app/bin/ztmesh-server`
-   （`GOOS=linux`、`GOARCH=amd64|arm64`、`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w"`）。
+1. 交叉编译 `server/` → staging 里的 `app/bin/ztmesh-server`（单架构）或
+   `ztmesh-server-amd64` / `ztmesh-server-arm64`（多架构）。
+   参数：`GOOS=linux`、`GOARCH=amd64|arm64`、`CGO_ENABLED=0`、`-trimpath -ldflags "-s -w -X main.version=<manifest 版本>"`。
    二进制**不会**写进源码树。
-2. arm 构建时，若存在 `dl/zerotier-one.arm64` 就用它临时替换 `fpk/app/zt/zerotier-one`，构建结束后还原为 x86-64 版本。
-3. 生成内层 `app.tgz`（`app/` 目录树）与外层归档（`manifest`、`app.tgz`、`cmd/*`、`config/*`、`wizard/*`、`ICON*.PNG`），
-   并把 `manifest.checksum` 写成 `md5(app.tgz)`。
-4. 权限：目录 `0755`；`cmd/*`、`app/bin/ztmesh-server`、`app/zt/zerotier-one` 为 `0755`；其余 `0644`；属主统一 `root:root`。
-5. 结束前把 `fpk/manifest` 的 `platform` 还原为 `x86`，源码树保持 canonical。
+2. 守护进程同样按架构放入：`zt/zerotier-one`（单架构）或 `zt/zerotier-one-x86_64`、`zt/zerotier-one-aarch64`（多架构）。
+3. 生成内层 `app.tgz` 与外层归档（`manifest`、`app.tgz`、`cmd/*`、`config/*`、`wizard/*`、`ICON*.PNG`），
+   `manifest.checksum` 写成 `md5(app.tgz)`，`manifest.platform` 按目标写入（源码树里的 manifest 保持 `platform=all` 不被改写）。
+4. 权限：目录 `0755`；`cmd/*`、`bin/ztmesh-server*`、`zt/zerotier-one*` 为 `0755`；其余 `0644`；属主 `root:root`。
+5. 文本成员（`cmd/*`、`manifest`、`www/*` 等）在打包时**统一转成 LF**：
+   Windows 上编辑出来的 CRLF 会让 Linux 的 shebang 变成 `#!/bin/bash^M` 而直接起不来，
+   自检阶段也会拦住含 CR 的 `cmd/*`。
 
-没有可用的 Go 工具链时，可以预置二进制回退：放到 `dl/ztmesh-server-x86_64`（或 `dl/ztmesh-server-arm`）；
+没有可用的 Go 工具链时，可以预置二进制回退：`dl/ztmesh-server-<arch>`；
 两者都没有则脚本以中文报错退出（退出码 2）。
 
 打包后校验（Node 仅用于校验脚本，运行时不依赖 Node）：
 
 ```bash
+node verify_fpk.js ztmesh-all.fpk
 node verify_fpk.js ztmesh-x86_64.fpk
-node verify_fpk.js ztmesh-arm.fpk
 ```
 
-开发自测（可选，不随包发布）：`tests/smoke.py` 用两个桩服务（本地 ZeroTier API + ZeroTier Central）
-驱动真实二进制，覆盖 30 项接口契约：
-
-```bash
-cd server && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o ../tests/ztmesh-server.exe .
-cd .. && go build -o tests/stubcmd.exe tests/stubcmd/main.go
-python tests/smoke.py
-```
-
-校验内容：包骨架与 `cmd/*` 可执行位、`bin/ztmesh-server` 与 `zt/zerotier-one` 的 ELF 头与 `e_machine`
-（x86-64=62 / arm64=183）、`manifest.checksum == md5(app.tgz)`、`manifest.platform` 与包一致、
-无 `install_dep_apps` 依赖、无遗留 Node 后端、无 `.pid`/`.sock`/令牌等运行时残留。

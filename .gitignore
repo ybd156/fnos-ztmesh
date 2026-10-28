@@ -11,12 +11,18 @@
 /fpk/app/bin/
 *.fpk
 
-# 构建缓存与开发测试产物
+# 构建缓存
 /.gobuild/
+
+# 开发自测产物（tests/smoke.py）
 /tests/run/
+/tests/fixtures/
 /tests/*.exe
 /tests/*.state
 /tests/smoke.out
+/tests/ztmesh-server
+/tests/stubcmd
+/.wsl-test/
 
 # 测试运行产物
 /test-var/

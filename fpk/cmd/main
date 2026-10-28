@@ -18,7 +18,14 @@ ETC="${TRIM_PKGETC:-/var/apps/${APPNAME}/etc}"
 
 # --- resolved sub-paths ---------------------------------------------------
 ZT_DIR="${PKGVAR}/zt"                    # persistent zerotier working dir (identity lives here)
-ZT_BIN="${APPDEST}/zt/zerotier-one"      # zerotier daemon binary
+# ZeroTier daemon binary. Two sources, in priority order:
+#   1. $PKGVAR/zt-bin/zerotier-one  -- a core installed from the web UI, so an
+#      in-app core update survives app upgrades and can be rolled back;
+#   2. the packaged one in $APPDEST/zt (plain name for single-arch packages,
+#      or -x86_64/-aarch64 suffixed in the multi-arch "all" package).
+ZT_BIN_MANAGED="${PKGVAR}/zt-bin/zerotier-one"
+ZT_BIN_PKG="${APPDEST}/zt/zerotier-one"
+ZT_BIN="$ZT_BIN_PKG"
 WEB_BIN="${APPDEST}/bin/ztmesh-server"   # management backend (Go, static)
 WEB_ROOT="${APPDEST}/www"
 # ZeroTier local API + UDP listen port. Deliberately NOT 9993: this package is
@@ -68,19 +75,32 @@ fi
 mkdir -p "$PKGTMP" "$PKGVAR" "$ZT_DIR" 2>/dev/null
 log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$APPNAME] $*" >> "$MAIN_LOG" 2>/dev/null; }
 
-# --- architecture: pick the correct bundled zerotier-one --------------------
-# The fpk contains the matching binary for the platform declared in the
-# manifest. We still check uname -m here in case someone extracts the package
-# on the wrong architecture.
+# --- architecture: pick the correct zerotier-one ---------------------------
+# The package may ship one binary (per-arch package) or both, suffixed by
+# architecture (the "all" package). We still check uname -m here in case someone
+# extracts the package on the wrong architecture.
 ARCH="$(uname -m)"
 case "$ARCH" in
-  x86_64|amd64|aarch64|arm64) : ;;
+  x86_64|amd64) ZT_ARCH_TAG="x86_64" ;;
+  aarch64|arm64) ZT_ARCH_TAG="aarch64" ;;
   *)
     log "ERROR: unsupported architecture '$ARCH'"
     echo "当前设备架构 $ARCH 不受支持（仅 x86-64 / arm64）。" >&2
     exit 1
     ;;
 esac
+
+# Prefer the arch-suffixed core from the multi-arch package when the plain name
+# is absent (install_callback normally creates the symlink, this is a fallback).
+if [ ! -x "$ZT_BIN_PKG" ] && [ -x "${ZT_BIN_PKG}-${ZT_ARCH_TAG}" ]; then
+  ZT_BIN_PKG="${ZT_BIN_PKG}-${ZT_ARCH_TAG}"
+fi
+# A core installed from the web UI wins over the packaged one.
+if [ -x "$ZT_BIN_MANAGED" ]; then
+  ZT_BIN="$ZT_BIN_MANAGED"
+else
+  ZT_BIN="$ZT_BIN_PKG"
+fi
 
 # is_pid_alive <pid> [expected-exe] -> 0 alive, 1 dead
 # A PID file alone is not proof: PIDs are reused after a reboot, so when an

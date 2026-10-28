@@ -1,5 +1,5 @@
 // 校验构建出的 .fpk：结构、权限、二进制架构与内容契约。
-// 用法: node verify_fpk.js [ztmesh-x86_64.fpk|ztmesh-arm.fpk]
+// 用法: node verify_fpk.js [ztmesh-all.fpk|ztmesh-x86_64.fpk|ztmesh-arm.fpk]
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -8,10 +8,32 @@ const crypto = require('crypto');
 const FP = path.resolve(__dirname, process.argv[2] || 'ztmesh-x86_64.fpk');
 const raw = zlib.gunzipSync(fs.readFileSync(FP));
 
-// 从文件名推断目标平台（ztmesh-arm.fpk -> arm）
-const PLAT = (FP.match(/ztmesh-(\w+)\.fpk$/) || [])[1] || 'x86_64';
-const EXPECTED_MACHINE = PLAT === 'arm' ? 183 : 62;   // 183=aarch64, 62=x86-64
+// 从文件名推断目标平台（ztmesh-arm.fpk -> arm，ztmesh-all.fpk -> all）
+const PLAT = (FP.match(/ztmesh-(\w+)\.fpk$/) || [])[1] || 'all';
 const EXPECTED_MANIFEST_PLAT = PLAT === 'x86_64' ? 'x86' : PLAT;
+
+// 每个目标平台要校验的二进制：(包内路径, 期望 e_machine, 架构名)
+const ARCH_AMD64 = { machine: 62, name: 'x86-64' };
+const ARCH_ARM64 = { machine: 183, name: 'aarch64' };
+let BINARIES;
+if (PLAT === 'all') {
+  BINARIES = [
+    ['bin/ztmesh-server-amd64', ARCH_AMD64],
+    ['bin/ztmesh-server-arm64', ARCH_ARM64],
+    ['zt/zerotier-one-x86_64', ARCH_AMD64],
+    ['zt/zerotier-one-aarch64', ARCH_ARM64],
+  ];
+} else if (PLAT === 'arm') {
+  BINARIES = [
+    ['bin/ztmesh-server', ARCH_ARM64],
+    ['zt/zerotier-one', ARCH_ARM64],
+  ];
+} else {
+  BINARIES = [
+    ['bin/ztmesh-server', ARCH_AMD64],
+    ['zt/zerotier-one', ARCH_AMD64],
+  ];
+}
 
 function parseTar(buf) {
   const out = [];
@@ -48,8 +70,9 @@ const find = (list, n) => list.find((e) => e.name === n || e.name === './' + n);
 
 const REQUIRED_OUTER = ['manifest', 'ICON.PNG', 'ICON_256.PNG', 'config/privilege', 'config/resource', 'wizard/install', 'wizard/uninstall'];
 const REQUIRED_CMD = ['main', 'install_init', 'install_callback', 'upgrade_init', 'upgrade_callback', 'uninstall_init', 'uninstall_callback', 'config_init', 'config_callback'];
-// 2.0: 后端是 Go 单二进制 app/bin/ztmesh-server，不再是 server/server.js
-const REQUIRED_INNER = ['bin/ztmesh-server', 'ui/config', 'ui/images/icon_64.png', 'ui/images/icon_256.png', 'www/index.html', 'www/css/style.css', 'www/js/app.js', 'www/images/icon_64.png', 'zt/zerotier-one'];
+// 2.0: 后端是 Go 单二进制；2.1: 单包多架构时带架构后缀
+const REQUIRED_INNER = ['ui/config', 'ui/images/icon_64.png', 'ui/images/icon_256.png', 'www/index.html', 'www/css/style.css', 'www/js/app.js', 'www/images/icon_64.png']
+  .concat(BINARIES.map((b) => b[0]));
 
 console.log('\n=== CHECKS ===');
 let bad = 0;
@@ -62,20 +85,19 @@ for (const n of REQUIRED_CMD) {
 }
 for (const n of REQUIRED_INNER) ok(!!find(inner, n), `app/ has ${n}`);
 
-// ELF 头 + e_machine 必须与包平台一致（两个二进制都查）
-function checkElf(entry, label) {
+// ELF 头 + e_machine 必须与目标架构一致
+function checkElf(entry, label, arch) {
   if (!entry) { ok(false, `${label} missing, cannot check ELF`); return; }
   const d = entry.data;
   const isElf = d.length > 20 && d[0] === 0x7f && d[1] === 0x45 && d[2] === 0x4c && d[3] === 0x46;
   ok(isElf, `${label} is an ELF binary`);
   if (!isElf) return;
   const machine = d[5] === 1 ? d.readUInt16LE(18) : d.readUInt16BE(18);
-  ok(machine === EXPECTED_MACHINE, `${label} is ${PLAT} (e_machine=${machine}, expected ${EXPECTED_MACHINE})`);
+  ok(machine === arch.machine, `${label} is ${arch.name} (e_machine=${machine}, expected ${arch.machine})`);
   ok((entry.mode & 0o111) === 0o111, `${label} executable (mode ${entry.mode.toString(8)})`);
 }
 
-checkElf(find(inner, 'bin/ztmesh-server'), 'bin/ztmesh-server');
-checkElf(find(inner, 'zt/zerotier-one'), 'zt/zerotier-one');
+for (const [rel, arch] of BINARIES) checkElf(find(inner, rel), rel, arch);
 
 // 2.0 起不再打包 Node 后端源码
 const legacyServer = inner.filter((e) => /^\.?\/?server\//.test(e.name));

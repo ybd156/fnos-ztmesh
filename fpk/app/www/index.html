@@ -89,6 +89,23 @@
           <button class="btn btn-danger" id="btnAutostartOff">关闭开机自启</button>
         </div>
       </div>
+      <div class="card">
+        <div class="section-head">
+          <h3>ZeroTier 核心</h3>
+          <span class="net-status offline" id="coreBadge">检测中…</span>
+        </div>
+        <div class="subnet-status" id="coreInfo">—</div>
+        <div class="join-row">
+          <button class="btn" id="btnCoreCheck">检查更新</button>
+          <button class="btn btn-primary" id="btnCoreUpdate">升级核心</button>
+          <button class="btn btn-danger" id="btnCoreRollback">回滚</button>
+        </div>
+        <p class="hint">
+          从 ZeroTier 官方源下载对应架构的核心并热替换（升级期间隧道会中断几秒）。
+          升级后的核心保存在应用数据目录，重装应用不会被覆盖；旧版本保留，可随时回滚。
+        </p>
+        <div class="subnet-log" id="coreLog">—</div>
+      </div>
     </section>
 
     <!-- NETWORKS -->

@@ -1,16 +1,21 @@
-"""Local smoke test for the Go backend (runs on Windows, no NAS needed).
+"""本地冒烟测试：用桩服务驱动真实二进制，覆盖后端接口契约。
 
-Starts two stubs -- the local ZeroTier service API and a ZeroTier Central
-endpoint -- then drives the real binary over HTTP and asserts the contract the
-web UI depends on. Run with the bundled Python:
+    python tests/smoke.py            # Windows（先编译 tests/ztmesh-server.exe）
+    python3 tests/smoke.py           # Linux / WSL（先编译 tests/ztmesh-server）
 
-    python tests/smoke.py
+Windows 上子进程无法执行 bash 生命周期脚本，因此用 tests/stubcmd 这个 Go 桩程序；
+Linux 上直接跑 tests 里生成的 bash 桩脚本，与真实环境一致。
+
+覆盖：静态资源与路径穿越、/api 透传、子网路由（校验/开启/回滚/关闭）、令牌掩码、
+网络选项回读、开机自启、ZeroTier 核心检查/升级/回滚、服务控制、流量统计。
 """
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import urllib.error
@@ -19,13 +24,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-STUB_SRC = os.path.join(HERE, 'stubcmd')
-SMOKE = os.path.join(HERE, 'run')
+RUN = os.path.join(HERE, 'run')
+IS_WIN = os.name == 'nt'
+EXE_NAME = 'ztmesh-server.exe' if IS_WIN else 'ztmesh-server'
+STUB_NAME = 'stubcmd.exe' if IS_WIN else 'stubcmd'
+
 APPNAME = 'ztmesh'
 NWID = '8056c2e21c000001'
 ZT_PORT = 19993
 CENTRAL_PORT = 18080
+CORE_PORT = 18081
 WEB_PORT = 13443
+CORE_NEW = '9.9.9'
+CORE_OLD = '1.16.2'
 
 failures = []
 
@@ -39,7 +50,7 @@ def check(cond, msg, extra=''):
 
 
 # --------------------------------------------------------------------------
-# stub: local ZeroTier service API
+# 桩：本机 ZeroTier 服务 API
 # --------------------------------------------------------------------------
 NET = {
     'nwid': NWID,
@@ -54,6 +65,9 @@ NET = {
     'allowDefault': False,
     'allowDNS': False,
 }
+
+# 守护进程自报的版本；核心升级测试里会改它，模拟重启后换了个核心
+ZT_STATE = {'version': CORE_OLD}
 
 
 class ZTStub(BaseHTTPRequestHandler):
@@ -76,16 +90,14 @@ class ZTStub(BaseHTTPRequestHandler):
             return self._send(401, {'error': 'unauthorized'})
         p = self.path.split('?')[0]
         if p == '/status':
-            return self._send(200, {'address': 'deadbeef99', 'online': True, 'version': '1.16.2'})
+            return self._send(200, {'address': 'deadbeef99', 'online': True,
+                                    'version': ZT_STATE['version']})
         if p == '/network':
             return self._send(200, [NET])
         if p == '/network/' + NWID:
             return self._send(200, NET)
         if p == '/peer':
             return self._send(200, [])
-        if p.startswith('/controller/network/'):
-            # not the controller for this network
-            return self._send(404, {'error': 'not found'})
         return self._send(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -105,7 +117,7 @@ class ZTStub(BaseHTTPRequestHandler):
 
 
 # --------------------------------------------------------------------------
-# stub: ZeroTier Central (legacy v1 shape)
+# 桩：ZeroTier Central（legacy v1 形状）
 # --------------------------------------------------------------------------
 CENTRAL_ROUTES = []
 
@@ -143,6 +155,43 @@ class CentralStub(BaseHTTPRequestHandler):
         return self._send(200, {'id': NWID, 'config': {'routes': CENTRAL_ROUTES}})
 
 
+# --------------------------------------------------------------------------
+# 桩：官方更新源（releases/latest + deb 下载）
+# --------------------------------------------------------------------------
+DEB_PATH = os.path.join(HERE, 'fixtures', 'zerotier-one_%s_amd64.deb' % CORE_NEW)
+
+
+class CoreStub(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        p = self.path.split('?')[0]
+        if p.endswith('/releases/latest'):
+            return self._send(200, {'tag_name': 'v' + CORE_NEW, 'name': CORE_NEW})
+        if p.endswith('.deb'):
+            try:
+                with open(DEB_PATH, 'rb') as fh:
+                    data = fh.read()
+            except OSError:
+                return self._send(404, {'error': 'no fixture'})
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/vnd.debian.binary-package')
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        return self._send(404, {'error': 'not found'})
+
+
 def serve(handler, port):
     srv = ThreadingHTTPServer(('127.0.0.1', port), handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -150,7 +199,47 @@ def serve(handler, port):
 
 
 # --------------------------------------------------------------------------
-# HTTP helpers
+# 造一个真实的 .deb（ar + data.tar.xz），内容取自仓库里的 x86 核心
+# --------------------------------------------------------------------------
+def ar_member(name, payload):
+    hdr = name.ljust(16).encode()
+    hdr += b'0'.ljust(12)
+    hdr += b'0'.ljust(6)
+    hdr += b'0'.ljust(6)
+    hdr += b'100644'.ljust(8)
+    hdr += str(len(payload)).ljust(10).encode()
+    hdr += b'`\n'
+    assert len(hdr) == 60, len(hdr)
+    body = hdr + payload
+    if len(payload) % 2:
+        body += b'\n'
+    return body
+
+
+def build_deb_fixture():
+    core = os.path.join(ROOT, 'fpk', 'app', 'zt', 'zerotier-one')
+    if not os.path.exists(core):
+        return False
+    os.makedirs(os.path.dirname(DEB_PATH), exist_ok=True)
+    with open(core, 'rb') as fh:
+        payload = fh.read()
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode='w:xz') as tf:
+        info = tarfile.TarInfo('./usr/sbin/zerotier-one')
+        info.size = len(payload)
+        info.mode = 0o755
+        tf.addfile(info, io.BytesIO(payload))
+    deb = b'!<arch>\n'
+    deb += ar_member('debian-binary', b'2.0\n')
+    deb += ar_member('control.tar.xz', b'')
+    deb += ar_member('data.tar.xz', buf.getvalue())
+    with open(DEB_PATH, 'wb') as fh:
+        fh.write(deb)
+    return True
+
+
+# --------------------------------------------------------------------------
+# HTTP 助手
 # --------------------------------------------------------------------------
 def http(method, path, body=None, timeout=15):
     url = 'http://127.0.0.1:%d%s' % (WEB_PORT, path)
@@ -179,13 +268,14 @@ def http(method, path, body=None, timeout=15):
 # fixture
 # --------------------------------------------------------------------------
 def prepare_tree():
-    if os.path.isdir(SMOKE):
-        shutil.rmtree(SMOKE)
-    appdest = os.path.join(SMOKE, 'target')
-    pkgvar = os.path.join(SMOKE, 'var')
-    pkgtmp = os.path.join(SMOKE, 'tmp')
-    for d in (os.path.join(appdest, 'www', 'css'), os.path.join(pkgvar, 'zt'), pkgtmp,
-              os.path.join(SMOKE, 'cmd')):
+    if os.path.isdir(RUN):
+        shutil.rmtree(RUN)
+    appdest = os.path.join(RUN, 'target')
+    pkgvar = os.path.join(RUN, 'var')
+    pkgtmp = os.path.join(RUN, 'tmp')
+    for d in (os.path.join(appdest, 'www', 'css'), os.path.join(pkgvar, 'zt'),
+              os.path.join(appdest, 'zt'), os.path.join(appdest, 'bin'),
+              pkgtmp, os.path.join(RUN, 'cmd')):
         os.makedirs(d, exist_ok=True)
     with open(os.path.join(appdest, 'www', 'index.html'), 'w', encoding='utf-8') as fh:
         fh.write('<!doctype html><title>smoke</title><h1>ztmesh smoke</h1>')
@@ -195,12 +285,27 @@ def prepare_tree():
         fh.write('smoketoken\n')
     with open(os.path.join(pkgvar, 'zt', 'zerotier-one.port'), 'w') as fh:
         fh.write('%d\n' % ZT_PORT)
+
+    # 包内核心（模拟 app/zt/zerotier-one）：首次界面升级时它就是回滚目标
+    core_src = os.path.join(ROOT, 'fpk', 'app', 'zt', 'zerotier-one')
+    if os.path.exists(core_src):
+        dest = os.path.join(appdest, 'zt', 'zerotier-one')
+        shutil.copy2(core_src, dest)
+        os.chmod(dest, 0o755)
+
+    state_path = os.path.join(HERE, 'stub-autostart.state').replace('\\', '/')
     script = '\n'.join([
         '#!/bin/bash',
+        'STATE="' + state_path + '"',
         'case "$1" in',
-        '  autostart-status) echo "enabled=1"; echo "mechanism=systemd"; echo "detail=stub unit";;',
-        '  autostart-enable) echo "enabled=1"; echo "mechanism=systemd"; echo "detail=stub enabled";;',
-        '  autostart-disable) echo "enabled=0"; echo "mechanism=none"; echo "detail=stub disabled";;',
+        '  autostart-status)',
+        '    if [ "$(cat "$STATE" 2>/dev/null)" = "0" ]; then',
+        '      echo "enabled=0"; echo "mechanism=none"; echo "detail=stub disabled";',
+        '    else',
+        '      echo "enabled=1"; echo "mechanism=systemd"; echo "detail=stub unit";',
+        '    fi;;',
+        '  autostart-enable) echo 1 > "$STATE"; echo "enabled=1"; echo "mechanism=systemd"; echo "detail=stub enabled";;',
+        '  autostart-disable) echo 0 > "$STATE"; echo "enabled=0"; echo "mechanism=none"; echo "detail=stub disabled";;',
         '  subnet-status) echo "ip_forward=1"; echo "phy=eth0 nat_rule=present forward_rules=present";',
         '                 echo "nat_rule=present"; echo "forward_rules=present";;',
         '  subnet-up) echo "ip_forward=1"; echo "phy=eth0 nat_rule=present forward_rules=present";',
@@ -214,49 +319,66 @@ def prepare_tree():
         'exit 0',
         '',
     ])
-    with open(os.path.join(SMOKE, 'cmd', 'main'), 'w', encoding='utf-8', newline='\n') as fh:
+    main_path = os.path.join(RUN, 'cmd', 'main')
+    with open(main_path, 'w', encoding='utf-8', newline='\n') as fh:
         fh.write(script)
+    os.chmod(main_path, 0o755)
     return appdest, pkgvar, pkgtmp
+
+
+def elf_machine(path):
+    with open(path, 'rb') as fh:
+        head = fh.read(20)
+    if len(head) < 20 or head[:4] != b'\x7fELF':
+        return None
+    return int.from_bytes(head[18:20], 'little' if head[5] == 1 else 'big')
 
 
 def main():
     zt_srv = serve(ZTStub, ZT_PORT)
     central_srv = serve(CentralStub, CENTRAL_PORT)
+    core_srv = serve(CoreStub, CORE_PORT)
     appdest, pkgvar, pkgtmp = prepare_tree()
+    have_core = build_deb_fixture()
+    if not have_core:
+        print('!! 没有 fpk/app/zt/zerotier-one，跳过核心升级测试')
 
-    exe = os.path.join(HERE, 'ztmesh-server.exe')
-    stub = os.path.join(HERE, 'stubcmd.exe')
-    if not os.path.exists(exe) or not os.path.exists(stub):
-        print('缺少 %s / %s' % (exe, stub))
-        print('先在仓库根目录构建：')
-        print('  cd server && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o ../tests/ztmesh-server.exe .')
-        print('  go build -o tests/stubcmd.exe tests/stubcmd/main.go')
+    exe = os.path.join(HERE, EXE_NAME)
+    if not os.path.exists(exe):
+        print('缺少 %s，先编译：' % exe)
+        print('  Windows: cd server && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o ../tests/ztmesh-server.exe .')
+        print('  Linux:   cd server && GOOS=linux  GOARCH=amd64 CGO_ENABLED=0 go build -o ../tests/ztmesh-server .')
         return 2
 
     env = os.environ.copy()
     env.update({
-        # Windows cannot execute the bash lifecycle script from a child process
-        # here; the stub binary answers the same way cmd/main does.
-        'ZT_MAIN_SHELL': stub,
         'TRIM_APPNAME': APPNAME,
         'TRIM_APPDEST': appdest,
         'TRIM_PKGVAR': pkgvar,
         'TRIM_PKGTMP': pkgtmp,
-        'TRIM_PKGETC': os.path.join(SMOKE, 'etc'),
+        'TRIM_PKGETC': os.path.join(RUN, 'etc'),
         'TRIM_SERVICE_PORT': str(WEB_PORT),
-        'TRIM_PKGMETA': os.path.join(SMOKE, 'meta'),
+        'TRIM_PKGMETA': os.path.join(RUN, 'meta'),
         'ZT_CENTRAL_BASES': 'stub|http://127.0.0.1:%d/api/v1|token' % CENTRAL_PORT,
+        'ZT_CORE_API': 'http://127.0.0.1:%d/releases/latest' % CORE_PORT,
+        'ZT_CORE_DEB_BASE': 'http://127.0.0.1:%d/deb/zerotier-one_{v}_{arch}.deb' % CORE_PORT,
     })
-    # Fresh install state: the stub remembers autostart between runs, and the
-    # assertions below start from "enabled by install_callback".
+    if IS_WIN:
+        stub = os.path.join(HERE, STUB_NAME)
+        if not os.path.exists(stub):
+            print('缺少 %s，先编译： go build -o tests/stubcmd.exe tests/stubcmd/main.go' % stub)
+            return 2
+        env['ZT_MAIN_SHELL'] = stub
+
+    # 每次从「装好即开自启」的初始状态开始
     state = os.path.join(HERE, 'stub-autostart.state')
     if os.path.exists(state):
         os.remove(state)
 
-    log = open(os.path.join(SMOKE, 'server.log'), 'wb')
+    log = open(os.path.join(RUN, 'server.log'), 'wb')
     proc = subprocess.Popen([exe], env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
-        for _ in range(50):
+        for _ in range(60):
             try:
                 code, _ = http('GET', '/api/ping', timeout=1)
                 if code == 200:
@@ -268,6 +390,7 @@ def main():
         print('== 基础 ==')
         code, body = http('GET', '/api/ping')
         check(code == 200 and body.get('ok'), 'GET /api/ping', body)
+        check(body.get('version') == '2.1.0', '后端自报版本与 manifest 一致', body.get('version'))
 
         code, body = http('GET', '/api/health')
         check(code == 200 and body['zt']['reachable'] is True, 'GET /api/health 能探测守护进程', body)
@@ -295,10 +418,8 @@ def main():
 
         code, body = http('POST', '/api/subnet/enable', {'nwid': 'bogus'})
         check(code == 400 and body.get('error') == 'invalid-network-id', '非法网络 ID 被拒绝', body)
-
         code, body = http('POST', '/api/subnet/enable', {'nwid': NWID})
         check(code == 400 and body.get('error') == 'invalid-interface', '未选网卡被拒绝', body)
-
         code, body = http('POST', '/api/subnet/enable', {'nwid': NWID, 'phyIfaces': ['definitely-not-here']})
         check(code == 400 and body.get('error') == 'unknown-interface', '不存在的网卡被拒绝', body)
 
@@ -343,6 +464,36 @@ def main():
         code, body = http('POST', '/api/autostart', {'enabled': 'yes'})
         check(code == 400, '非布尔 enabled 被拒绝', body)
 
+        print('== ZeroTier 核心 ==')
+        code, body = http('GET', '/api/core')
+        check(code == 200 and body.get('ok') is True, 'GET /api/core', body)
+        check(body.get('current') == CORE_OLD, '读到当前核心版本', body.get('current'))
+        check(body.get('latest') == CORE_NEW, '读到官方最新版本', body.get('latest'))
+        check(body.get('updateAvailable') is True, '判定有新版本', body)
+        check(body.get('managed') is False, '初始使用包内核心', body.get('managed'))
+
+        if have_core:
+            ZT_STATE['version'] = CORE_NEW  # 模拟升级后守护进程重启、自报新版本
+            code, body = http('POST', '/api/core/update', {}, timeout=180)
+            check(code == 200 and body.get('ok') is True, 'POST /api/core/update 升级成功', body)
+            check(body.get('after') == CORE_NEW, '升级后版本为新版本', body.get('after'))
+            installed = os.path.join(pkgvar, 'zt-bin', 'zerotier-one')
+            check(os.path.exists(installed), '核心写入 $TRIM_PKGVAR/zt-bin', installed)
+            check(elf_machine(installed) == 62, '安装的核心架构正确（x86-64）', elf_machine(installed))
+            check(os.path.exists(installed + '.prev'), '保留上一版本用于回滚', installed + '.prev')
+
+            code, body = http('GET', '/api/core')
+            check(body.get('managed') is True, '升级后使用界面安装的核心', body)
+            check(body.get('rollbackReady') is True, '报告可回滚', body)
+            check(body.get('updateAvailable') is False, '升级后不再提示有新版本', body)
+
+            ZT_STATE['version'] = CORE_OLD
+            code, body = http('POST', '/api/core/rollback', {}, timeout=180)
+            check(code == 200 and body.get('ok') is True, 'POST /api/core/rollback 回滚成功', body)
+            check(body.get('after') == CORE_OLD, '回滚后版本恢复', body.get('after'))
+        else:
+            print('  SKIP 核心升级/回滚（缺少包内核心二进制）')
+
         print('== 服务控制 ==')
         code, body = http('POST', '/api/service/stop')
         check(code == 200 and body.get('action') == 'zt-stop', 'POST /api/service/stop 调用 cmd/main', body)
@@ -359,6 +510,7 @@ def main():
         log.close()
         zt_srv.shutdown()
         central_srv.shutdown()
+        core_srv.shutdown()
 
     print()
     if failures:
